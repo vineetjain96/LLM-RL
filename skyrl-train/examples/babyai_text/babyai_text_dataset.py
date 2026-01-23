@@ -18,7 +18,6 @@ from typing import List, Dict, Any
 
 from datasets import Dataset
 
-
 # Available BabyAI environments organized by difficulty
 BABYAI_ENVS = {
     # Simple navigation tasks
@@ -213,9 +212,7 @@ def create_dataset(
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Generate BabyAI-Text dataset for training"
-    )
+    parser = argparse.ArgumentParser(description="Generate BabyAI-Text dataset for training")
     parser.add_argument(
         "--output_dir",
         default="~/data/babyai_text",

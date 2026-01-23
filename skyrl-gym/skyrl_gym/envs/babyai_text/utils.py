@@ -115,9 +115,7 @@ def format_observation(
     if carrying:
         parts.append(f"\nYou are carrying: {carrying}")
 
-    parts.append(
-        "\nAvailable actions: turn left, turn right, move forward, pick up, drop, toggle, done"
-    )
+    parts.append("\nAvailable actions: turn left, turn right, move forward, pick up, drop, toggle, done")
     parts.append("\nProvide your action in the format: <action>your action</action>")
 
     return "\n".join(parts)

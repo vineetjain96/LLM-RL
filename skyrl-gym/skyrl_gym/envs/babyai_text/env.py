@@ -145,13 +145,9 @@ class BabyAITextEnv(BaseTextEnv):
             if obj_type > 1:  # Not unseen or empty
                 obj_name, color_name = utils.get_object_description(obj_type, obj_color)
                 if color_name:
-                    descriptions.append(
-                        f"You see a {color_name} {obj_name} {dist} step(s) ahead."
-                    )
+                    descriptions.append(f"You see a {color_name} {obj_name} {dist} step(s) ahead.")
                 else:
-                    descriptions.append(
-                        f"You see a {obj_name} {dist} step(s) ahead."
-                    )
+                    descriptions.append(f"You see a {obj_name} {dist} step(s) ahead.")
 
         # Check left side
         for dist in range(1, center + 1):
@@ -161,13 +157,9 @@ class BabyAITextEnv(BaseTextEnv):
             if obj_type > 1:
                 obj_name, color_name = utils.get_object_description(obj_type, obj_color)
                 if color_name:
-                    descriptions.append(
-                        f"You see a {color_name} {obj_name} {dist} step(s) to your left."
-                    )
+                    descriptions.append(f"You see a {color_name} {obj_name} {dist} step(s) to your left.")
                 else:
-                    descriptions.append(
-                        f"You see a {obj_name} {dist} step(s) to your left."
-                    )
+                    descriptions.append(f"You see a {obj_name} {dist} step(s) to your left.")
 
         # Check right side
         for dist in range(1, center + 1):
@@ -177,13 +169,9 @@ class BabyAITextEnv(BaseTextEnv):
             if obj_type > 1:
                 obj_name, color_name = utils.get_object_description(obj_type, obj_color)
                 if color_name:
-                    descriptions.append(
-                        f"You see a {color_name} {obj_name} {dist} step(s) to your right."
-                    )
+                    descriptions.append(f"You see a {color_name} {obj_name} {dist} step(s) to your right.")
                 else:
-                    descriptions.append(
-                        f"You see a {obj_name} {dist} step(s) to your right."
-                    )
+                    descriptions.append(f"You see a {obj_name} {dist} step(s) to your right.")
 
         if not descriptions:
             descriptions.append("You see an empty space ahead.")
