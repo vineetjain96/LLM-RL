@@ -31,6 +31,10 @@ include = ["skyrl_gym*"]
 dev = [
     "pytest"
 ]
+babyai = [
+    "gymnasium>=0.29.0",
+    "minigrid>=2.3.0",
+]
 
 [tool.black]
 line-length = 120

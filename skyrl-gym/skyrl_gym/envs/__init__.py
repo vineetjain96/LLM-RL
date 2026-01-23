@@ -36,3 +36,8 @@ register(
     id="searchcode",
     entry_point="skyrl_gym.envs.searchcode.env:SearchCodeEnv",
 )
+
+register(
+    id="babyai_text",
+    entry_point="skyrl_gym.envs.babyai_text.env:BabyAITextEnv",
+)

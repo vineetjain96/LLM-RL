@@ -164,6 +164,11 @@ miniswe = [
     "mini-swe-agent>=1.12.0",
     "litellm",
 ]
+babyai = [
+    # BabyAI-Text environment dependencies
+    "gymnasium>=0.29.0",
+    "minigrid>=2.3.0",
+]
 
 
 [[tool.uv.index]]
