@@ -8,15 +8,12 @@ set -x
 #
 # Prerequisites:
 #   1. Generate the dataset:
-#      uv run examples/babyai_text/babyai_text_dataset.py --output_dir $HOME/data/babyai_text
+#      uv run --extra babyai examples/babyai_text/babyai_text_dataset.py --output_dir $HOME/data/babyai_text
 #
-#   2. (Optional) Install minigrid for full environment support:
-#      uv pip install minigrid gymnasium
-#
-#   3. Set your WANDB API key (optional, for logging):
+#   2. Set your WANDB API key (optional, for logging):
 #      export WANDB_API_KEY=<your_key_here>
 #
-#   4. Run training:
+#   3. Run training:
 #      bash examples/babyai_text/run_babyai_text.sh
 #
 # You can override defaults with environment variables:
@@ -32,7 +29,7 @@ set -x
 : "${ENV_NAME:=BabyAI-GoToLocal-v0}"
 : "${MAX_TURNS:=64}"
 
-uv run --isolated --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.main_base \
+uv run --isolated --extra $INFERENCE_BACKEND --extra babyai -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
