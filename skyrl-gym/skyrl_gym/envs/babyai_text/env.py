@@ -140,7 +140,7 @@ class BabyAITextEnv(BaseTextEnv):
         # Check what's directly in front
         for dist in range(1, center + 1):
             cell = image[center - dist, center]
-            obj_type, obj_color, obj_state = cell[0], cell[1], cell[2]
+            obj_type, obj_color, _ = cell[0], cell[1], cell[2]
 
             if obj_type > 1:  # Not unseen or empty
                 obj_name, color_name = utils.get_object_description(obj_type, obj_color)
@@ -156,7 +156,7 @@ class BabyAITextEnv(BaseTextEnv):
         # Check left side
         for dist in range(1, center + 1):
             cell = image[center, center - dist]
-            obj_type, obj_color, obj_state = cell[0], cell[1], cell[2]
+            obj_type, obj_color, _ = cell[0], cell[1], cell[2]
 
             if obj_type > 1:
                 obj_name, color_name = utils.get_object_description(obj_type, obj_color)
@@ -172,7 +172,7 @@ class BabyAITextEnv(BaseTextEnv):
         # Check right side
         for dist in range(1, center + 1):
             cell = image[center, center + dist]
-            obj_type, obj_color, obj_state = cell[0], cell[1], cell[2]
+            obj_type, obj_color, _ = cell[0], cell[1], cell[2]
 
             if obj_type > 1:
                 obj_name, color_name = utils.get_object_description(obj_type, obj_color)
@@ -267,9 +267,9 @@ class BabyAITextEnv(BaseTextEnv):
         if action_idx is None:
             # Invalid action - provide feedback
             feedback = (
-                f"I couldn't understand your action. Please use one of the available actions:\n"
-                f"turn left, turn right, move forward, pick up, drop, toggle, done\n"
-                f"Format your action as: <action>your action</action>"
+                "I couldn't understand your action. Please use one of the available actions:\n"
+                "turn left, turn right, move forward, pick up, drop, toggle, done\n"
+                "Format your action as: <action>your action</action>"
             )
 
             return BaseTextEnvStepOutput(
@@ -297,11 +297,6 @@ class BabyAITextEnv(BaseTextEnv):
 
         # Generate observation
         if self._done:
-            if self._success:
-                obs_content = f"Congratulations! You completed the mission: {self._mission}"
-            else:
-                obs_content = f"Episode ended. The mission was: {self._mission}"
-
             return BaseTextEnvStepOutput(
                 observations=[],
                 reward=final_reward,
