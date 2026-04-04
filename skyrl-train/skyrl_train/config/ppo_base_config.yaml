@@ -136,6 +136,7 @@ trainer:
       q_loss_coef: 1.0
       v_loss_coef: 1.0
       critic_loss_type: "smooth_l1"
+      critic_head_bias: false
     dynamic_sampling:
       type: null # filter, replace, or null
       max_sample_batches: 30 # sample at most this many batches before stopping, -1 to sample forever

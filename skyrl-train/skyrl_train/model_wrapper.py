@@ -403,6 +403,7 @@ def _get_critic_model(
     q_head_prefix="q_head",
     sequence_parallel_size=1,
     use_sample_packing: bool = False,
+    critic_head_bias: bool = False,
 ):
     class CriticModel(base_pretrained_model):
         supports_gradient_checkpointing = True
@@ -412,9 +413,9 @@ def _get_critic_model(
             setattr(self, self.base_model_prefix, base_llm_model(config))
 
             self.value_head_prefix = value_head_prefix
-            setattr(self, value_head_prefix, nn.Linear(config.hidden_size, 1, bias=False))
+            setattr(self, value_head_prefix, nn.Linear(config.hidden_size, 1, bias=critic_head_bias))
             self.q_head_prefix = q_head_prefix
-            setattr(self, q_head_prefix, nn.Linear(config.hidden_size, 1, bias=False))
+            setattr(self, q_head_prefix, nn.Linear(config.hidden_size, 1, bias=critic_head_bias))
 
             self.sequence_parallel_size = sequence_parallel_size
             self.use_sample_packing = use_sample_packing
@@ -547,6 +548,7 @@ def get_llm_for_sequence_regression(
     init_value_head: bool = False,
     value_head_prefix="value_head",
     q_head_prefix="q_head",
+    critic_head_bias: bool = False,
     device_map=None,
     sequence_parallel_size=1,
     use_sample_packing: bool = False,
@@ -578,6 +580,7 @@ def get_llm_for_sequence_regression(
         q_head_prefix,
         sequence_parallel_size=sequence_parallel_size,
         use_sample_packing=use_sample_packing,
+        critic_head_bias=critic_head_bias,
     )
 
     if load_in_4bit:
@@ -638,7 +641,11 @@ def get_llm_for_sequence_regression(
     if init_value_head:
         value_head = getattr(model, value_head_prefix)
         value_head.weight.data.normal_(mean=0.0, std=1 / (config.hidden_size + 1))
+        if value_head.bias is not None:
+            value_head.bias.data.zero_()
         q_head = getattr(model, q_head_prefix)
         q_head.weight.data.normal_(mean=0.0, std=1 / (config.hidden_size + 1))
+        if q_head.bias is not None:
+            q_head.bias.data.zero_()
 
     return model

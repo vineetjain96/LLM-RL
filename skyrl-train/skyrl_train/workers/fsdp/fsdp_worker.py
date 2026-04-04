@@ -298,6 +298,7 @@ class FSDPCriticWorkerBase(CriticWorkerBase):
                 exclude_modules=self.cfg.trainer.critic.model.lora.exclude_modules,
                 value_head_prefix=self.cfg.trainer.algorithm.value_head_prefix,
                 q_head_prefix=self.cfg.trainer.algorithm.state_action.q_head_prefix,
+                critic_head_bias=self.cfg.trainer.algorithm.state_action.critic_head_bias,
                 init_value_head=self.cfg.trainer.policy.model.path == self.cfg.trainer.critic.model.path,
                 sequence_parallel_size=self.cfg.trainer.critic.sequence_parallel_size,
                 use_sample_packing=self.cfg.trainer.use_sample_packing,
