@@ -2,12 +2,14 @@ __pycache__/
 /wandb/
 /skyrl-train/wandb/
 **/*.egg-info/
-# hydra logs
+
+# Hydra logs
 /outputs/
 /skyrl-train/outputs/
 /data/lcb
 
 # Documentation build artifacts
+docs/public/api-ref/
 /skyrl-train/docs/_build/
 docs/_build/
 docs/_static/
@@ -22,28 +24,107 @@ docs/_spelling/
 .cache/
 .pytest_cache/
 
-# NOTE (sumanthrh): Don't add .env to gitignore. .env file when passed to uv is used to set env vars for each ray worker process. 
+# NOTE (sumanthrh): Don't add .env to gitignore. .env file when passed to uv is used to set env vars for each ray worker process.
 # If it's in .gitignore then it won't be a part of the working directory shipped by uv and your env vars will not be set.
 # This will just appear as a warning (silent failure) and you're gonna have a bad time.
 # .env
 
 # .env files inside directories can be ignored
 /skyrl-train/.env
-/skyrl-gym/.env 
+/skyrl-gym/.env
 
 /skyrl_train/.venv
 /skyrl-gym/.venv
 
-# build
+# Build
 /skyrl-gym/build
 /skyrl-gym/dist
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+!docs/lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
 
 *.log
+nohup.out
+tensorboard_log/
+pip-log.txt
+pip-delete-this-directory.txt
 
 # SQLite database files
 *.db
+*.db-journal
+*.db-wal
+*.db-shm
 
 # uv lock files
 uv.lock
 
 logs/
+
+# Byte-compiled / optimized / DLL files
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Environments
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# MkDocs build output
+site/
+
+# IDEs and editors
+.idea/
+.vscode/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Local artifacts
+tinker.db
+
+# Alembic - don't track pycache
+tx/tinker/alembic/__pycache__/

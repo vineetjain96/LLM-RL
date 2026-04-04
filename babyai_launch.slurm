@@ -148,7 +148,7 @@ DATASET_SWEEP_ARGS=()
 if [[ -n "${SWEEP_PARAM:-}" && -n "${SWEEP_VALUE:-}" ]]; then
   DATASET_SWEEP_ARGS=(--sweep_param "$SWEEP_PARAM" --sweep_values "$SWEEP_VALUE")
 fi
-uv run --extra babyai examples/babyai_text/babyai_text_dataset.py \
+uv run --extra babyai examples/train/babyai_text/babyai_text_dataset.py \
   --output_dir "$DATA_DIR" \
   --difficulty "$DATASET_DIFFICULTY" \
   --env_name "$DATASET_ENV_NAME" \
@@ -167,7 +167,7 @@ fi
 
 # OPTIONAL: run a copy of the launcher without --isolated so it uses this venv
 tmp_run=/tmp/run_babyai_text_noisolated.sh
-sed 's/uv run --isolated/uv run/' examples/babyai_text/run_babyai_text.sh > "$tmp_run"
+sed 's/uv run --isolated/uv run/' examples/train/babyai_text/run_babyai_text.sh > "$tmp_run"
 chmod +x "$tmp_run"
 
 # Run training (NUM_GPUS/LOGGER/INFERENCE_BACKEND come from env)

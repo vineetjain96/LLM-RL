@@ -6,15 +6,15 @@ This guide is focused on what you asked for: environment kwargs you can sweep ov
 
 Environment selection/kwargs flow through these files:
 
-1. `skyrl-train/examples/babyai_text/run_babyai_text.sh`
+1. `examples/train/babyai_text/run_babyai_text.sh`
    - Launch entrypoint.
    - This is where you set the environment ID and pass config overrides for training runs/sweeps.
 
-2. `skyrl-train/skyrl_train/config/ppo_base_config.yaml`
+2. `skyrl/train/config/ppo_base_config.yaml`
    - Default training config.
    - Holds default env-related config keys (env name and env kwargs container).
 
-3. `skyrl-train/skyrl_train/trainer.py`
+3. `skyrl/train/trainer.py`
    - Runtime wiring.
    - Reads env config and constructs the actual Gymnasium/MiniGrid environment (kwargs are unpacked here into env creation).
 

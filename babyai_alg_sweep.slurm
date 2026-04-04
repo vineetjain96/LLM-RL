@@ -304,7 +304,7 @@ uv pip install --python "$UV_PYTHON" gymnasium minigrid
 
 if [[ "$GENERATE_DATASET" == "true" ]]; then
   if [[ ! -f "$DATA_DIR/train.parquet" || ! -f "$DATA_DIR/validation.parquet" ]]; then
-    uv run --extra babyai examples/babyai_text/babyai_text_dataset.py \
+    uv run --extra babyai examples/train/babyai_text/babyai_text_dataset.py \
       --output_dir "$DATA_DIR" \
       --difficulty "$DATASET_DIFFICULTY" \
       --env_name "$DATASET_ENV_NAME" \
@@ -318,7 +318,7 @@ ls -lh "$DATA_DIR/train.parquet" "$DATA_DIR/validation.parquet"
 
 # Use non-isolated uv run so we use the venv created above.
 tmp_run=/tmp/run_babyai_alg_sweep_fully_async_noisolated.sh
-sed 's/uv run --isolated/uv run/' examples/babyai_text/run_babyai_alg_sweep_fully_async.sh > "$tmp_run"
+sed 's/uv run --isolated/uv run/' examples/train/babyai_text/run_babyai_alg_sweep_fully_async.sh > "$tmp_run"
 chmod +x "$tmp_run"
 RUN_OVERRIDES=(
   "trainer.placement.policy_num_nodes=${POLICY_NUM_NODES}"

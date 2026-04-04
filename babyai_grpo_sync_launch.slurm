@@ -112,7 +112,7 @@ UV_PYTHON="$UV_PROJECT_ENVIRONMENT/bin/python"
 uv sync --python "$UV_PYTHON"
 uv pip install --python "$UV_PYTHON" gymnasium minigrid
 
-uv run --extra babyai examples/babyai_text/babyai_text_dataset.py \
+uv run --extra babyai examples/train/babyai_text/babyai_text_dataset.py \
   --output_dir "$DATA_DIR" \
   --difficulty "$DATASET_DIFFICULTY" \
   --env_name "$DATASET_ENV_NAME" \
@@ -122,7 +122,7 @@ uv run --extra babyai examples/babyai_text/babyai_text_dataset.py \
 ls -lh "$DATA_DIR/train.parquet" "$DATA_DIR/validation.parquet"
 
 tmp_run=/tmp/run_babyai_text_noisolated.sh
-sed 's/uv run --isolated/uv run/' examples/babyai_text/run_babyai_text.sh > "$tmp_run"
+sed 's/uv run --isolated/uv run/' examples/train/babyai_text/run_babyai_text.sh > "$tmp_run"
 chmod +x "$tmp_run"
 
 if [[ -n "${EXTRA_OVERRIDES:-}" ]]; then
