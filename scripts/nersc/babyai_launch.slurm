@@ -22,7 +22,7 @@ ENV_NAME="BabyAI-GoToLocal-v0"
 MAX_TURNS=64
 
 # Optional sweep controls:
-#  - submit an array job: sbatch --array=0-2 babyai_launch.slurm
+#  - submit an array job: sbatch --array=0-2 scripts/nersc/babyai_launch.slurm
 #  - set SWEEP_PARAM and SWEEP_VALUES (comma-separated)
 #  - each array task picks one value by SLURM_ARRAY_TASK_ID
 SWEEP_PARAM="${SWEEP_PARAM:-}"
@@ -125,7 +125,7 @@ export NCCL_DEBUG=WARN
 # Quiet Ray's GPU env warning you saw (optional)
 export RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
 
-# Critical: ensure SCRATCH exists in-container so run_babyai_text.sh doesn't fall back to /data/...
+# Critical: ensure SCRATCH exists in-container so scripts/nersc/run_babyai_text.sh doesn't fall back to /data/...
 echo "SCRATCH=$SCRATCH"
 echo "DATA_DIR=$DATA_DIR"
 
@@ -167,7 +167,7 @@ fi
 
 # OPTIONAL: run a copy of the launcher without --isolated so it uses this venv
 tmp_run=/tmp/run_babyai_text_noisolated.sh
-sed 's/uv run --isolated/uv run/' examples/train/babyai_text/run_babyai_text.sh > "$tmp_run"
+sed 's/uv run --isolated/uv run/' scripts/nersc/run_babyai_text.sh > "$tmp_run"
 chmod +x "$tmp_run"
 
 # Run training (NUM_GPUS/LOGGER/INFERENCE_BACKEND come from env)

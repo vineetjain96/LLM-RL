@@ -123,6 +123,22 @@ def test_temperature_propagation():
     assert cfg.trainer.algorithm.temperature == 0.7
 
 
+def test_babyai_typed_config_overrides():
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "environment.env_class=babyai_text",
+            "environment.skyrl_gym.babyai_text.env_name=BabyAI-GoToObj-v0",
+            "environment.skyrl_gym.babyai_text.max_steps=32",
+            "environment.skyrl_gym.babyai_text.env_kwargs.room_size=8",
+        ]
+    )
+
+    assert cfg.environment.env_class == "babyai_text"
+    assert cfg.environment.skyrl_gym.babyai_text.env_name == "BabyAI-GoToObj-v0"
+    assert cfg.environment.skyrl_gym.babyai_text.max_steps == 32
+    assert cfg.environment.skyrl_gym.babyai_text.env_kwargs["room_size"] == 8
+
+
 def test_legacy_config_translation():
     """Test that legacy config format is translated to new format."""
     import warnings

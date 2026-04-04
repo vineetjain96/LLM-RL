@@ -23,7 +23,7 @@ Welcome to the SkyRL-Train examples! In this folder you can find the following e
 - `text_to_sql/`: [Text-to-SQL (SkyRL-SQL)](https://docs.skyrl.ai/docs/examples/multi_turn_text2sql) environment and training scripts for mapping natural language questions to SQL queries.
 - `step_wise/`: Step-wise training for chat-template agnostic multi-turn RL training.
 - `search/`: Multi-turn search agent training with the SearchR1 dataset, backed by a FAISS-based retriever server.
-- `babyai_text/`: BabyAI text-environment training scripts, including GRPO and the step-wise `state_action_td` actor-critic recipe.
+- `babyai_text/`: BabyAI text-environment training scripts, including GRPO and the step-wise `state_action_td` actor-critic recipe. See [`../../BABYAI_USER_GUIDE.md`](../../BABYAI_USER_GUIDE.md) for the current experiment guide.
 
 ## Integrations
 

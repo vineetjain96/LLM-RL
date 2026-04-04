@@ -15,13 +15,13 @@
 set -euo pipefail
 
 # Usage:
-#   sbatch babyai_state_action_td_launch.slurm
+#   sbatch scripts/nersc/babyai_state_action_td_launch.slurm
 #
 # Optional overrides:
-#   MODEL_NAME=Qwen/Qwen3-4B-Instruct-2507 sbatch babyai_state_action_td_launch.slurm
-#   ENV_KWARGS_KV="room_size=8,num_dists=2" sbatch babyai_state_action_td_launch.slurm
-#   N_SAMPLES_PER_PROMPT=1 sbatch babyai_state_action_td_launch.slurm
-#   EXTRA_OVERRIDES="trainer.epochs=20 trainer.train_batch_size=256" sbatch babyai_state_action_td_launch.slurm
+#   MODEL_NAME=Qwen/Qwen3-4B-Instruct-2507 sbatch scripts/nersc/babyai_state_action_td_launch.slurm
+#   ENV_KWARGS_KV="room_size=8,num_dists=2" sbatch scripts/nersc/babyai_state_action_td_launch.slurm
+#   N_SAMPLES_PER_PROMPT=1 sbatch scripts/nersc/babyai_state_action_td_launch.slurm
+#   EXTRA_OVERRIDES="trainer.epochs=20 trainer.train_batch_size=256" sbatch scripts/nersc/babyai_state_action_td_launch.slurm
 
 # ======= Main script parameters ======= #
 MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3-4B-Instruct-2507}"
@@ -114,7 +114,7 @@ uv run --extra babyai examples/train/babyai_text/babyai_text_dataset.py \
 ls -lh "$DATA_DIR/train.parquet" "$DATA_DIR/validation.parquet"
 
 tmp_run=/tmp/run_babyai_state_action_td_noisolated.sh
-sed 's/uv run --isolated/uv run/' examples/train/babyai_text/run_babyai_state_action_td.sh > "$tmp_run"
+sed 's/uv run --isolated/uv run/' scripts/nersc/run_babyai_state_action_td.sh > "$tmp_run"
 chmod +x "$tmp_run"
 
 if [[ -n "${EXTRA_OVERRIDES:-}" ]]; then

@@ -22,10 +22,10 @@ set -euo pipefail
 #   grpo, rloo, cispo, ppo
 #
 # Submit:
-#   sbatch --array=0-3 babyai_alg_sweep.slurm
+#   sbatch --array=0-3 scripts/nersc/babyai_alg_sweep.slurm
 #
 # Optional custom order/subset:
-#   ALGO_LIST="grpo,ppo" sbatch --array=0-1 babyai_alg_sweep.slurm
+#   ALGO_LIST="grpo,ppo" sbatch --array=0-1 scripts/nersc/babyai_alg_sweep.slurm
 ALGO_LIST="${ALGO_LIST:-grpo,rloo,cispo,ppo}"
 IFS=',' read -r -a ALGO_VALUES <<< "$ALGO_LIST"
 
@@ -318,7 +318,7 @@ ls -lh "$DATA_DIR/train.parquet" "$DATA_DIR/validation.parquet"
 
 # Use non-isolated uv run so we use the venv created above.
 tmp_run=/tmp/run_babyai_alg_sweep_fully_async_noisolated.sh
-sed 's/uv run --isolated/uv run/' examples/train/babyai_text/run_babyai_alg_sweep_fully_async.sh > "$tmp_run"
+sed 's/uv run --isolated/uv run/' scripts/nersc/run_babyai_alg_sweep_fully_async.sh > "$tmp_run"
 chmod +x "$tmp_run"
 RUN_OVERRIDES=(
   "trainer.placement.policy_num_nodes=${POLICY_NUM_NODES}"

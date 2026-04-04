@@ -1,5 +1,6 @@
 from skyrl.train.config.config import (
     AlgorithmConfig,
+    BabyAITextEnvConfig,
     BaseConfig,
     ChatTemplateConfig,
     CISPOConfig,
@@ -67,6 +68,7 @@ __all__ = [
     "DynamicSamplingConfig",
     "OffPolicyCorrectionConfig",
     "BaseConfig",
+    "BabyAITextEnvConfig",
     "MixedPrecisionConfig",
     "MegatronDDPConfig",
     "MegatronLoraConfig",

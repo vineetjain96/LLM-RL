@@ -2,34 +2,21 @@
 set -euo pipefail
 set -x
 
-# BabyAI-Text training with GRPO for Qwen2.5-1.5B-Instruct
-#
-# This script trains a language model to complete BabyAI grid-world navigation
-# tasks using text-based observations and actions.
+# BabyAI-Text GRPO training on the current SkyRL layout.
 #
 # Prerequisites:
-#   1. Generate the dataset:
-#      uv run --extra babyai examples/babyai_text/babyai_text_dataset.py --output_dir $HOME/data/babyai_text
+#   uv run --extra babyai examples/train/babyai_text/babyai_text_dataset.py --output_dir $HOME/data/babyai_text
 #
-#   2. Set your WANDB API key (optional, for logging):
-#      export WANDB_API_KEY=<your_key_here>
-#
-#   3. Run training:
-#      bash examples/babyai_text/run_babyai_text.sh
-#
-# You can override defaults with environment variables:
-#   NUM_GPUS=8 INFERENCE_BACKEND=sglang bash examples/babyai_text/run_babyai_text.sh
-#   ENV_KWARGS_KV=room_size=8,num_dists=2 bash examples/babyai_text/run_babyai_text.sh
-#   SWEEP_PARAM=room_size SWEEP_VALUES=5,8,11 bash examples/babyai_text/run_babyai_text.sh
+# Usage:
+#   bash scripts/nersc/run_babyai_text.sh
 
-# Configuration with defaults
 : "${DATA_DIR:="$HOME/data/babyai_text"}"
 : "${NUM_GPUS:=4}"
-: "${LOGGER:=wandb}"  # Change to "console" for stdout logging
-: "${INFERENCE_BACKEND:=vllm}"  # Or "sglang"
+: "${LOGGER:=wandb}"
+: "${INFERENCE_BACKEND:=vllm}"
 : "${MODEL_NAME:=Qwen/Qwen2.5-1.5B-Instruct}"
 : "${ALGO_NAME:=grpo}"
-: "${RUN_NAME_TIMESTAMP:=}"  # if empty, auto-generated (UTC)
+: "${RUN_NAME_TIMESTAMP:=}"
 : "${GRPO_USE_KL_LOSS:=false}"
 : "${DATA_KEEP_IN_MEMORY:=false}"
 : "${DATASET_NUM_WORKERS:=1}"
@@ -38,13 +25,12 @@ set -x
 : "${SAVE_DATALOADER_STATE_IN_CKPT:=false}"
 : "${CKPT_ROOT:="$HOME/ckpts"}"
 
-# BabyAI-specific settings
 : "${ENV_NAME:=BabyAI-GoToLocal-v0}"
 : "${MAX_TURNS:=64}"
-: "${ENV_KWARGS_KV:=}"  # comma-separated key=value list passed to environment.skyrl_gym.babyai_text.env_kwargs
-: "${SWEEP_PARAM:=}"    # single env kwarg to sweep, e.g. room_size
-: "${SWEEP_VALUES:=}"   # comma-separated values for SWEEP_PARAM, e.g. 5,8,11
-: "${SWEEP_VALUE:=}"    # optional single sweep value (useful with slurm array jobs)
+: "${ENV_KWARGS_KV:=}"
+: "${SWEEP_PARAM:=}"
+: "${SWEEP_VALUES:=}"
+: "${SWEEP_VALUE:=}"
 
 USER_OVERRIDES=("$@")
 
@@ -109,20 +95,20 @@ run_training() {
     ckpt_path="${ckpt_path}_${run_suffix}"
   fi
 
-  uv run --isolated --extra $INFERENCE_BACKEND --extra babyai -m skyrl_train.entrypoints.main_base \
+  uv run --isolated --extra fsdp --extra babyai -m skyrl.train.entrypoints.main_base \
     data.train_data="['$DATA_DIR/train.parquet']" \
     data.val_data="['$DATA_DIR/validation.parquet']" \
     data.keep_in_memory="$DATA_KEEP_IN_MEMORY" \
     data.dataset_num_workers="$DATASET_NUM_WORKERS" \
     data.dataloader_num_workers="$DATALOADER_NUM_WORKERS" \
-    trainer.algorithm.advantage_estimator="grpo" \
+    trainer.algorithm.advantage_estimator=grpo \
     trainer.policy.model.path="$MODEL_NAME" \
     trainer.placement.colocate_all=true \
     trainer.strategy=fsdp2 \
-    trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
-    trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
-    generator.num_inference_engines=$NUM_GPUS \
-    generator.inference_engine_tensor_parallel_size=1 \
+    trainer.placement.policy_num_gpus_per_node="$NUM_GPUS" \
+    trainer.placement.ref_num_gpus_per_node="$NUM_GPUS" \
+    generator.inference_engine.num_engines="$NUM_GPUS" \
+    generator.inference_engine.tensor_parallel_size=1 \
     trainer.epochs=40 \
     trainer.eval_batch_size=512 \
     trainer.eval_before_train=true \
@@ -141,20 +127,20 @@ run_training() {
     trainer.policy.optimizer_config.lr=1.0e-6 \
     trainer.algorithm.use_kl_in_reward=false \
     trainer.algorithm.use_kl_loss="$GRPO_USE_KL_LOSS" \
-    generator.backend=$INFERENCE_BACKEND \
-    generator.run_engines_locally=true \
-    generator.weight_sync_backend=nccl \
-    generator.async_engine=true \
+    generator.inference_engine.backend="$INFERENCE_BACKEND" \
+    generator.inference_engine.run_engines_locally=true \
+    generator.inference_engine.weight_sync_backend=nccl \
+    generator.inference_engine.async_engine=true \
     generator.batched=false \
-    generator.max_turns=$MAX_TURNS \
+    generator.max_turns="$MAX_TURNS" \
     environment.env_class=babyai_text \
-    environment.skyrl_gym.babyai_text.env_name=$ENV_NAME \
-    environment.skyrl_gym.babyai_text.max_steps=$MAX_TURNS \
+    environment.skyrl_gym.babyai_text.env_name="$ENV_NAME" \
+    environment.skyrl_gym.babyai_text.max_steps="$MAX_TURNS" \
     "${env_kwargs_overrides[@]}" \
     generator.n_samples_per_prompt=5 \
-    generator.gpu_memory_utilization=0.8 \
+    generator.inference_engine.gpu_memory_utilization=0.8 \
     trainer.logger="$LOGGER" \
-    trainer.project_name="babyai_text" \
+    trainer.project_name=babyai_text \
     trainer.run_name="$run_name" \
     trainer.ckpt_path="$ckpt_path" \
     trainer.dump_eval_results=true \

@@ -2,42 +2,59 @@
 set -euo pipefail
 set -x
 
-# BabyAI-Text state-action actor-critic training with TD bootstrapping.
-#
-# This recipe keeps the LM actor, but switches the RL objective to step-level
-# actor-critic:
-# - generator.step_wise_trajectories=true
-# - Q(s, a) learned with one-step TD
-# - V(s) learned with TD-lambda
-# - actor advantage is Q(s, a) - V(s)
+# Fully-async GRPO on BabyAI-Text.
 #
 # Prerequisites:
-#   uv run --extra babyai examples/babyai_text/babyai_text_dataset.py --output_dir $HOME/data/babyai_text
+#   uv run --extra babyai examples/train/babyai_text/babyai_text_dataset.py --output_dir $HOME/data/babyai_text
 #
 # Usage:
-#   bash examples/babyai_text/run_babyai_state_action_td.sh
+#   bash scripts/nersc/run_babyai_grpo_fully_async.sh
 
 : "${DATA_DIR:="$HOME/data/babyai_text"}"
-: "${NUM_GPUS:=4}"
 : "${LOGGER:=wandb}"
 : "${INFERENCE_BACKEND:=vllm}"
 : "${MODEL_NAME:=Qwen/Qwen2.5-1.5B-Instruct}"
-: "${ALGO_NAME:=state_action_td}"
+: "${CKPT_ROOT:="$HOME/ckpts"}"
+: "${ALGO_NAME:=grpo}"
 : "${RUN_NAME_TIMESTAMP:=}"
+
 : "${DATA_KEEP_IN_MEMORY:=false}"
 : "${DATASET_NUM_WORKERS:=1}"
 : "${DATALOADER_NUM_WORKERS:=0}"
 : "${SAVE_OPTIMIZER_STATE_IN_CKPT:=false}"
 : "${SAVE_DATALOADER_STATE_IN_CKPT:=false}"
-: "${CKPT_ROOT:="$HOME/ckpts"}"
 
-# BabyAI-specific settings
 : "${ENV_NAME:=BabyAI-GoToLocal-v0}"
 : "${MAX_TURNS:=64}"
 : "${ENV_KWARGS_KV:=}"
 : "${SWEEP_PARAM:=}"
 : "${SWEEP_VALUES:=}"
 : "${SWEEP_VALUE:=}"
+
+: "${NUM_POLICY_GPUS:=2}"
+: "${NUM_INFERENCE_ENGINES:=2}"
+
+: "${EPOCHS:=40}"
+: "${MINI_BATCH_SIZE:=128}"
+: "${MICRO_FORWARD_BATCH_SIZE:=32}"
+: "${MICRO_TRAIN_BATCH_SIZE:=32}"
+: "${MAX_PROMPT_LENGTH:=512}"
+: "${MAX_GENERATE_LENGTH:=2048}"
+: "${N_SAMPLES_PER_PROMPT:=5}"
+: "${LR:=1.0e-6}"
+: "${WEIGHT_DECAY:=1e-2}"
+: "${MAX_GRAD_NORM:=1.0}"
+: "${CKPT_INTERVAL:=10}"
+
+: "${MAX_STALENESS_STEPS:=4}"
+: "${NUM_PARALLEL_GENERATION_WORKERS:=$((MINI_BATCH_SIZE * (MAX_STALENESS_STEPS + 1)))}"
+
+: "${GRPO_USE_KL_LOSS:=false}"
+: "${GRPO_EPS_CLIP_LOW:=0.2}"
+: "${GRPO_EPS_CLIP_HIGH:=0.2}"
+: "${KL_ESTIMATOR_TYPE:=k3}"
+: "${KL_LOSS_COEF:=0.001}"
+: "${USE_TIS:=false}"
 
 USER_OVERRIDES=("$@")
 
@@ -80,7 +97,6 @@ run_training() {
   local -a env_kwargs_overrides=()
 
   build_env_kwargs_overrides "$ENV_KWARGS_KV" env_kwargs_overrides
-
   if [[ -n "$sweep_param" ]]; then
     env_kwargs_overrides+=("+environment.skyrl_gym.babyai_text.env_kwargs.${sweep_param}=${sweep_value}")
   fi
@@ -95,67 +111,71 @@ run_training() {
     run_ts="$(date -u +%Y%m%d_%H%M%S)"
   fi
 
-  local run_name="${ALGO_NAME}_${env_tag}_${model_tag}_${run_ts}"
-  local ckpt_path="$CKPT_ROOT/${ALGO_NAME}_${env_tag}_${model_tag}_${run_ts}_ckpt"
+  local run_name="${ALGO_NAME}_async_${env_tag}_${model_tag}_${run_ts}"
+  local ckpt_path="$CKPT_ROOT/${ALGO_NAME}_async_${env_tag}_${model_tag}_${run_ts}_ckpt"
   if [[ -n "$run_suffix" ]]; then
     run_name="${run_name}_${run_suffix}"
     ckpt_path="${ckpt_path}_${run_suffix}"
   fi
 
-  uv run --isolated --extra $INFERENCE_BACKEND --extra babyai -m skyrl_train.entrypoints.main_base \
+  uv run --isolated --extra fsdp --extra babyai -m examples.train.fully_async.main_fully_async \
     data.train_data="['$DATA_DIR/train.parquet']" \
     data.val_data="['$DATA_DIR/validation.parquet']" \
     data.keep_in_memory="$DATA_KEEP_IN_MEMORY" \
     data.dataset_num_workers="$DATASET_NUM_WORKERS" \
     data.dataloader_num_workers="$DATALOADER_NUM_WORKERS" \
-    trainer.algorithm.advantage_estimator="state_action_td" \
-    trainer.algorithm.policy_loss_type="gspo" \
-    trainer.algorithm.loss_reduction="sequence_mean" \
+    trainer.algorithm.advantage_estimator=grpo \
+    trainer.algorithm.policy_loss_type=regular \
+    trainer.algorithm.loss_reduction=token_mean \
+    trainer.algorithm.grpo_norm_by_std=true \
+    trainer.algorithm.eps_clip_low="$GRPO_EPS_CLIP_LOW" \
+    trainer.algorithm.eps_clip_high="$GRPO_EPS_CLIP_HIGH" \
+    trainer.algorithm.use_kl_loss="$GRPO_USE_KL_LOSS" \
+    trainer.algorithm.use_kl_in_reward=false \
+    trainer.algorithm.kl_estimator_type="$KL_ESTIMATOR_TYPE" \
+    trainer.algorithm.kl_loss_coef="$KL_LOSS_COEF" \
+    trainer.algorithm.use_tis="$USE_TIS" \
+    trainer.algorithm.dynamic_sampling.type=null \
     trainer.policy.model.path="$MODEL_NAME" \
-    trainer.critic.model.path="$MODEL_NAME" \
-    trainer.placement.colocate_all=true \
+    trainer.placement.colocate_all=false \
     trainer.strategy=fsdp2 \
-    trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
-    trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
-    trainer.placement.critic_num_gpus_per_node=$NUM_GPUS \
-    generator.num_inference_engines=$NUM_GPUS \
-    generator.inference_engine_tensor_parallel_size=1 \
-    trainer.epochs=40 \
+    trainer.placement.policy_num_gpus_per_node="$NUM_POLICY_GPUS" \
+    trainer.placement.ref_num_gpus_per_node="$NUM_POLICY_GPUS" \
+    trainer.fully_async.max_staleness_steps="$MAX_STALENESS_STEPS" \
+    trainer.fully_async.num_parallel_generation_workers="$NUM_PARALLEL_GENERATION_WORKERS" \
+    generator.inference_engine.num_engines="$NUM_INFERENCE_ENGINES" \
+    generator.inference_engine.tensor_parallel_size=1 \
+    trainer.epochs="$EPOCHS" \
     trainer.eval_batch_size=512 \
     trainer.eval_before_train=true \
     trainer.eval_interval=5 \
     trainer.update_epochs_per_batch=1 \
-    trainer.train_batch_size=512 \
-    trainer.policy_mini_batch_size=128 \
-    trainer.critic_mini_batch_size=128 \
-    trainer.micro_forward_batch_size_per_gpu=32 \
-    trainer.micro_train_batch_size_per_gpu=32 \
-    trainer.ckpt_interval=10 \
+    trainer.train_batch_size="$MINI_BATCH_SIZE" \
+    trainer.policy_mini_batch_size="$MINI_BATCH_SIZE" \
+    trainer.micro_forward_batch_size_per_gpu="$MICRO_FORWARD_BATCH_SIZE" \
+    trainer.micro_train_batch_size_per_gpu="$MICRO_TRAIN_BATCH_SIZE" \
+    trainer.ckpt_interval="$CKPT_INTERVAL" \
     trainer.save_optimizer_state_in_ckpt="$SAVE_OPTIMIZER_STATE_IN_CKPT" \
     trainer.save_dataloader_state_in_ckpt="$SAVE_DATALOADER_STATE_IN_CKPT" \
-    trainer.max_prompt_length=512 \
-    generator.max_input_length=4096 \
-    generator.sampling_params.max_generate_length=256 \
-    trainer.policy.optimizer_config.lr=1.0e-6 \
-    trainer.critic.optimizer_config.lr=5.0e-6 \
-    trainer.algorithm.use_kl_in_reward=false \
-    trainer.algorithm.use_kl_loss=false \
-    generator.backend=$INFERENCE_BACKEND \
-    generator.run_engines_locally=true \
-    generator.weight_sync_backend=nccl \
-    generator.async_engine=true \
+    trainer.max_prompt_length="$MAX_PROMPT_LENGTH" \
+    generator.sampling_params.max_generate_length="$MAX_GENERATE_LENGTH" \
+    trainer.policy.optimizer_config.lr="$LR" \
+    trainer.policy.optimizer_config.weight_decay="$WEIGHT_DECAY" \
+    trainer.policy.optimizer_config.max_grad_norm="$MAX_GRAD_NORM" \
+    generator.inference_engine.backend="$INFERENCE_BACKEND" \
+    generator.inference_engine.run_engines_locally=true \
+    generator.inference_engine.weight_sync_backend=nccl \
+    generator.inference_engine.async_engine=true \
     generator.batched=false \
-    generator.use_conversation_multi_turn=true \
-    generator.step_wise_trajectories=true \
-    generator.max_turns=$MAX_TURNS \
+    generator.max_turns="$MAX_TURNS" \
     environment.env_class=babyai_text \
-    environment.skyrl_gym.babyai_text.env_name=$ENV_NAME \
-    environment.skyrl_gym.babyai_text.max_steps=$MAX_TURNS \
+    environment.skyrl_gym.babyai_text.env_name="$ENV_NAME" \
+    environment.skyrl_gym.babyai_text.max_steps="$MAX_TURNS" \
     "${env_kwargs_overrides[@]}" \
-    generator.n_samples_per_prompt=5 \
-    generator.gpu_memory_utilization=0.8 \
+    generator.n_samples_per_prompt="$N_SAMPLES_PER_PROMPT" \
+    generator.inference_engine.gpu_memory_utilization=0.8 \
     trainer.logger="$LOGGER" \
-    trainer.project_name="babyai_text" \
+    trainer.project_name=babyai_text \
     trainer.run_name="$run_name" \
     trainer.ckpt_path="$ckpt_path" \
     trainer.dump_eval_results=true \
@@ -173,7 +193,6 @@ elif [[ -n "$SWEEP_PARAM" || -n "$SWEEP_VALUES" ]]; then
     echo "Both SWEEP_PARAM and SWEEP_VALUES must be set for sweep runs." >&2
     exit 1
   fi
-
   IFS=',' read -r -a sweep_values <<< "$SWEEP_VALUES"
   for value in "${sweep_values[@]}"; do
     [[ -z "$value" ]] && continue

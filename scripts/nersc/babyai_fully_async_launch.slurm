@@ -251,7 +251,7 @@ ls -lh "$DATA_DIR/train.parquet" "$DATA_DIR/validation.parquet"
 
 # Use non-isolated uv run so we use the venv created above.
 tmp_run=/tmp/run_babyai_grpo_fully_async_noisolated.sh
-sed 's/uv run --isolated/uv run/' examples/train/babyai_text/run_babyai_grpo_fully_async.sh > "$tmp_run"
+sed 's/uv run --isolated/uv run/' scripts/nersc/run_babyai_grpo_fully_async.sh > "$tmp_run"
 chmod +x "$tmp_run"
 bash "$tmp_run" \
   "trainer.placement.policy_num_nodes=${NUM_NODES}" \

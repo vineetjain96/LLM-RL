@@ -546,11 +546,21 @@ class GSM8kLLMJudgeEnvConfig(BaseConfig):
 
 
 @dataclass
+class BabyAITextEnvConfig(BaseConfig):
+    env_name: str = "BabyAI-GoToLocal-v0"
+    env_kwargs: Dict[str, Any] = field(default_factory=dict)
+    max_steps: int = 64
+    language: str = "english"
+    render_mode: Optional[str] = None
+
+
+@dataclass
 class SkyRLGymConfig(BaseConfig):
     max_env_workers: int = 32
     text2sql: Text2SQLEnvConfig = field(default_factory=Text2SQLEnvConfig)
     llm_as_a_judge: GSM8kLLMJudgeEnvConfig = field(default_factory=GSM8kLLMJudgeEnvConfig)
     search: SearchEnvConfig = field(default_factory=SearchEnvConfig)
+    babyai_text: BabyAITextEnvConfig = field(default_factory=BabyAITextEnvConfig)
 
 
 @dataclass
