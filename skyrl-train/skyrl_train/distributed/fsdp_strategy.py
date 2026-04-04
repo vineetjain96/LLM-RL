@@ -402,6 +402,7 @@ class FSDPStrategy(DistributedStrategy):
         client_state={},
         tag=None,
         tokenizer=None,
+        save_optimizer_states: bool = True,
     ):
         """Save model checkpoint for FSDP"""
         import warnings
@@ -447,7 +448,7 @@ class FSDPStrategy(DistributedStrategy):
 
                     # Get and save optimizer state dict if optimizer is provided
                     optimizer_state_dict = {}
-                    if optimizer is not None:
+                    if optimizer is not None and save_optimizer_states:
                         optimizer_state_dict = optimizer.state_dict()
                     self.print(f"[rank-{rank}]: Saving optim to {optim_path}")
                     with io.open_file(optim_path, "wb") as f:

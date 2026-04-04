@@ -2,35 +2,28 @@
 set -euo pipefail
 set -x
 
-# BabyAI-Text training with GRPO for Qwen2.5-1.5B-Instruct
+# BabyAI-Text state-action actor-critic training with TD bootstrapping.
 #
-# This script trains a language model to complete BabyAI grid-world navigation
-# tasks using text-based observations and actions.
+# This recipe keeps the LM actor, but switches the RL objective to step-level
+# actor-critic:
+# - generator.step_wise_trajectories=true
+# - Q(s, a) learned with one-step TD
+# - V(s) learned with TD-lambda
+# - actor advantage is Q(s, a) - V(s)
 #
 # Prerequisites:
-#   1. Generate the dataset:
-#      uv run --extra babyai examples/babyai_text/babyai_text_dataset.py --output_dir $HOME/data/babyai_text
+#   uv run --extra babyai examples/babyai_text/babyai_text_dataset.py --output_dir $HOME/data/babyai_text
 #
-#   2. Set your WANDB API key (optional, for logging):
-#      export WANDB_API_KEY=<your_key_here>
-#
-#   3. Run training:
-#      bash examples/babyai_text/run_babyai_text.sh
-#
-# You can override defaults with environment variables:
-#   NUM_GPUS=8 INFERENCE_BACKEND=sglang bash examples/babyai_text/run_babyai_text.sh
-#   ENV_KWARGS_KV=room_size=8,num_dists=2 bash examples/babyai_text/run_babyai_text.sh
-#   SWEEP_PARAM=room_size SWEEP_VALUES=5,8,11 bash examples/babyai_text/run_babyai_text.sh
+# Usage:
+#   bash examples/babyai_text/run_babyai_state_action_td.sh
 
-# Configuration with defaults
 : "${DATA_DIR:="$HOME/data/babyai_text"}"
 : "${NUM_GPUS:=4}"
-: "${LOGGER:=wandb}"  # Change to "console" for stdout logging
-: "${INFERENCE_BACKEND:=vllm}"  # Or "sglang"
+: "${LOGGER:=wandb}"
+: "${INFERENCE_BACKEND:=vllm}"
 : "${MODEL_NAME:=Qwen/Qwen2.5-1.5B-Instruct}"
-: "${ALGO_NAME:=grpo}"
-: "${RUN_NAME_TIMESTAMP:=}"  # if empty, auto-generated (UTC)
-: "${GRPO_USE_KL_LOSS:=false}"
+: "${ALGO_NAME:=state_action_td}"
+: "${RUN_NAME_TIMESTAMP:=}"
 : "${DATA_KEEP_IN_MEMORY:=false}"
 : "${DATASET_NUM_WORKERS:=1}"
 : "${DATALOADER_NUM_WORKERS:=0}"
@@ -41,10 +34,10 @@ set -x
 # BabyAI-specific settings
 : "${ENV_NAME:=BabyAI-GoToLocal-v0}"
 : "${MAX_TURNS:=64}"
-: "${ENV_KWARGS_KV:=}"  # comma-separated key=value list passed to environment.skyrl_gym.babyai_text.env_kwargs
-: "${SWEEP_PARAM:=}"    # single env kwarg to sweep, e.g. room_size
-: "${SWEEP_VALUES:=}"   # comma-separated values for SWEEP_PARAM, e.g. 5,8,11
-: "${SWEEP_VALUE:=}"    # optional single sweep value (useful with slurm array jobs)
+: "${ENV_KWARGS_KV:=}"
+: "${SWEEP_PARAM:=}"
+: "${SWEEP_VALUES:=}"
+: "${SWEEP_VALUE:=}"
 
 USER_OVERRIDES=("$@")
 
@@ -115,12 +108,16 @@ run_training() {
     data.keep_in_memory="$DATA_KEEP_IN_MEMORY" \
     data.dataset_num_workers="$DATASET_NUM_WORKERS" \
     data.dataloader_num_workers="$DATALOADER_NUM_WORKERS" \
-    trainer.algorithm.advantage_estimator="grpo" \
+    trainer.algorithm.advantage_estimator="state_action_td" \
+    trainer.algorithm.policy_loss_type="gspo" \
+    trainer.algorithm.loss_reduction="sequence_mean" \
     trainer.policy.model.path="$MODEL_NAME" \
+    trainer.critic.model.path="$MODEL_NAME" \
     trainer.placement.colocate_all=true \
     trainer.strategy=fsdp2 \
     trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
     trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
+    trainer.placement.critic_num_gpus_per_node=$NUM_GPUS \
     generator.num_inference_engines=$NUM_GPUS \
     generator.inference_engine_tensor_parallel_size=1 \
     trainer.epochs=40 \
@@ -130,6 +127,7 @@ run_training() {
     trainer.update_epochs_per_batch=1 \
     trainer.train_batch_size=512 \
     trainer.policy_mini_batch_size=128 \
+    trainer.critic_mini_batch_size=128 \
     trainer.micro_forward_batch_size_per_gpu=32 \
     trainer.micro_train_batch_size_per_gpu=32 \
     trainer.ckpt_interval=10 \
@@ -137,15 +135,18 @@ run_training() {
     trainer.save_dataloader_state_in_ckpt="$SAVE_DATALOADER_STATE_IN_CKPT" \
     trainer.max_prompt_length=512 \
     generator.max_input_length=4096 \
-    generator.sampling_params.max_generate_length=2048 \
+    generator.sampling_params.max_generate_length=256 \
     trainer.policy.optimizer_config.lr=1.0e-6 \
+    trainer.critic.optimizer_config.lr=5.0e-6 \
     trainer.algorithm.use_kl_in_reward=false \
-    trainer.algorithm.use_kl_loss="$GRPO_USE_KL_LOSS" \
+    trainer.algorithm.use_kl_loss=false \
     generator.backend=$INFERENCE_BACKEND \
     generator.run_engines_locally=true \
     generator.weight_sync_backend=nccl \
     generator.async_engine=true \
     generator.batched=false \
+    generator.use_conversation_multi_turn=true \
+    generator.step_wise_trajectories=true \
     generator.max_turns=$MAX_TURNS \
     environment.env_class=babyai_text \
     environment.skyrl_gym.babyai_text.env_name=$ENV_NAME \

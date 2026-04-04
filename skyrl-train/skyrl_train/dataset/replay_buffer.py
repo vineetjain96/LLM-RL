@@ -66,6 +66,19 @@ class Experience:
     loss_mask: Optional[Integer[torch.LongTensor, "batch response_len"]]
     action_mask: Optional[Integer[torch.Tensor, "batch response_len"]]
     rollout_logprobs: Optional[Float[torch.Tensor, "batch response_len"]]
+    step_reward: Optional[Float[torch.Tensor, "batch"]]
+    done: Optional[Float[torch.Tensor, "batch"]]
+    bootstrap_mask: Optional[Float[torch.Tensor, "batch"]]
+    state_index: Optional[Integer[torch.Tensor, "batch"]]
+    action_end_index: Optional[Integer[torch.Tensor, "batch"]]
+    next_state_index: Optional[Integer[torch.Tensor, "batch"]]
+    parsed_action_id: Optional[Integer[torch.Tensor, "batch"]]
+    action_valid: Optional[Float[torch.Tensor, "batch"]]
+    q_values: Optional[Float[torch.Tensor, "batch"]]
+    v_values: Optional[Float[torch.Tensor, "batch"]]
+    next_v_values: Optional[Float[torch.Tensor, "batch"]]
+    q_targets: Optional[Float[torch.Tensor, "batch"]]
+    v_targets: Optional[Float[torch.Tensor, "batch"]]
     num_actions: int
     info: Optional[dict]
     kl: Optional[Float[torch.Tensor, "batch response_len"]] = None
@@ -91,6 +104,32 @@ class Experience:
             self.action_mask = to(self.action_mask, device)
         if self.rollout_logprobs is not None:
             self.rollout_logprobs = to(self.rollout_logprobs, device)
+        if self.step_reward is not None:
+            self.step_reward = to(self.step_reward, device)
+        if self.done is not None:
+            self.done = to(self.done, device)
+        if self.bootstrap_mask is not None:
+            self.bootstrap_mask = to(self.bootstrap_mask, device)
+        if self.state_index is not None:
+            self.state_index = to(self.state_index, device)
+        if self.action_end_index is not None:
+            self.action_end_index = to(self.action_end_index, device)
+        if self.next_state_index is not None:
+            self.next_state_index = to(self.next_state_index, device)
+        if self.parsed_action_id is not None:
+            self.parsed_action_id = to(self.parsed_action_id, device)
+        if self.action_valid is not None:
+            self.action_valid = to(self.action_valid, device)
+        if self.q_values is not None:
+            self.q_values = to(self.q_values, device)
+        if self.v_values is not None:
+            self.v_values = to(self.v_values, device)
+        if self.next_v_values is not None:
+            self.next_v_values = to(self.next_v_values, device)
+        if self.q_targets is not None:
+            self.q_targets = to(self.q_targets, device)
+        if self.v_targets is not None:
+            self.v_targets = to(self.v_targets, device)
 
     def pin_memory(self):
         self.sequences = pin_memory(self.sequences)
@@ -111,6 +150,32 @@ class Experience:
             self.action_mask = self.action_mask.pin_memory()
         if self.rollout_logprobs is not None:
             self.rollout_logprobs = self.rollout_logprobs.pin_memory()
+        if self.step_reward is not None:
+            self.step_reward = self.step_reward.pin_memory()
+        if self.done is not None:
+            self.done = self.done.pin_memory()
+        if self.bootstrap_mask is not None:
+            self.bootstrap_mask = self.bootstrap_mask.pin_memory()
+        if self.state_index is not None:
+            self.state_index = self.state_index.pin_memory()
+        if self.action_end_index is not None:
+            self.action_end_index = self.action_end_index.pin_memory()
+        if self.next_state_index is not None:
+            self.next_state_index = self.next_state_index.pin_memory()
+        if self.parsed_action_id is not None:
+            self.parsed_action_id = self.parsed_action_id.pin_memory()
+        if self.action_valid is not None:
+            self.action_valid = self.action_valid.pin_memory()
+        if self.q_values is not None:
+            self.q_values = self.q_values.pin_memory()
+        if self.v_values is not None:
+            self.v_values = self.v_values.pin_memory()
+        if self.next_v_values is not None:
+            self.next_v_values = self.next_v_values.pin_memory()
+        if self.q_targets is not None:
+            self.q_targets = self.q_targets.pin_memory()
+        if self.v_targets is not None:
+            self.v_targets = self.v_targets.pin_memory()
         return self
 
 
@@ -141,6 +206,19 @@ class BufferItem:
     attention_mask: Optional[Integer[torch.LongTensor, "seq_len"]]  # noqa: F821
     loss_mask: Optional[Integer[torch.LongTensor, "response_len"]]  # noqa: F821
     action_mask: Optional[Integer[torch.Tensor, "response_len"]]  # noqa: F821
+    step_reward: Optional[Float[torch.Tensor, "batch"]]  # noqa: F821
+    done: Optional[Float[torch.Tensor, "batch"]]  # noqa: F821
+    bootstrap_mask: Optional[Float[torch.Tensor, "batch"]]  # noqa: F821
+    state_index: Optional[Integer[torch.Tensor, "batch"]]  # noqa: F821
+    action_end_index: Optional[Integer[torch.Tensor, "batch"]]  # noqa: F821
+    next_state_index: Optional[Integer[torch.Tensor, "batch"]]  # noqa: F821
+    parsed_action_id: Optional[Integer[torch.Tensor, "batch"]]  # noqa: F821
+    action_valid: Optional[Float[torch.Tensor, "batch"]]  # noqa: F821
+    q_values: Optional[Float[torch.Tensor, "batch"]]  # noqa: F821
+    v_values: Optional[Float[torch.Tensor, "batch"]]  # noqa: F821
+    next_v_values: Optional[Float[torch.Tensor, "batch"]]  # noqa: F821
+    q_targets: Optional[Float[torch.Tensor, "batch"]]  # noqa: F821
+    v_targets: Optional[Float[torch.Tensor, "batch"]]  # noqa: F821
     num_actions: int
     info: Optional[dict]
 
@@ -169,6 +247,19 @@ def split_experience_batch(experience: Experience) -> List[BufferItem]:
         "attention_mask",
         "loss_mask",
         "action_mask",
+        "step_reward",
+        "done",
+        "bootstrap_mask",
+        "state_index",
+        "action_end_index",
+        "next_state_index",
+        "parsed_action_id",
+        "action_valid",
+        "q_values",
+        "v_values",
+        "next_v_values",
+        "q_targets",
+        "v_targets",
         "num_actions",
     )
     if len(experience.sequences.shape) == 1:

@@ -400,6 +400,7 @@ def _get_critic_model(
     base_pretrained_model,
     base_llm_model,
     value_head_prefix="value_head",
+    q_head_prefix="q_head",
     sequence_parallel_size=1,
     use_sample_packing: bool = False,
 ):
@@ -412,6 +413,8 @@ def _get_critic_model(
 
             self.value_head_prefix = value_head_prefix
             setattr(self, value_head_prefix, nn.Linear(config.hidden_size, 1, bias=False))
+            self.q_head_prefix = q_head_prefix
+            setattr(self, q_head_prefix, nn.Linear(config.hidden_size, 1, bias=False))
 
             self.sequence_parallel_size = sequence_parallel_size
             self.use_sample_packing = use_sample_packing
@@ -428,6 +431,9 @@ def _get_critic_model(
             input_ids: torch.LongTensor = None,
             num_actions: Optional[Union[int, list[int]]] = None,
             attention_mask: Optional[torch.Tensor] = None,
+            state_index: Optional[torch.Tensor] = None,
+            action_end_index: Optional[torch.Tensor] = None,
+            next_state_index: Optional[torch.Tensor] = None,
             return_output=False,
         ) -> torch.Tensor:
             position_ids = attention_mask.long().cumsum(-1) - 1
@@ -478,11 +484,33 @@ def _get_critic_model(
                 )
                 last_hidden_states_BSH = last_hidden_states_SH.unsqueeze(0)
 
+            hidden_states_for_gather = last_hidden_states_BSH
+            if self.use_sample_packing:
+                batch_size, seqlen = attention_mask.shape
+                hidden_states_for_gather = pad_input(
+                    hidden_states_for_gather.squeeze(0), indices=nnz_indices, batch=batch_size, seqlen=seqlen
+                )
+
+            if state_index is not None or action_end_index is not None or next_state_index is not None:
+                assert state_index is not None and action_end_index is not None and next_state_index is not None
+                batch_indices = torch.arange(hidden_states_for_gather.size(0), device=hidden_states_for_gather.device)
+                state_repr = hidden_states_for_gather[batch_indices, state_index.long()]
+                action_repr = hidden_states_for_gather[batch_indices, action_end_index.long()]
+                next_state_repr = hidden_states_for_gather[batch_indices, next_state_index.long()]
+
+                critic_outputs = {
+                    "v_values": getattr(self, self.value_head_prefix)(state_repr).squeeze(-1),
+                    "q_values": getattr(self, self.q_head_prefix)(action_repr).squeeze(-1),
+                    "next_v_values": getattr(self, self.value_head_prefix)(next_state_repr).squeeze(-1),
+                }
+                if return_output:
+                    return critic_outputs, outputs
+                return critic_outputs
+
             values_BSH = getattr(self, self.value_head_prefix)(last_hidden_states_BSH)
 
             if self.use_sample_packing:
                 # add padding back - postprocess logits to be compatible with original tensors
-                batch_size, seqlen = attention_mask.shape
                 # (1, nnz, 1) -> (nnz, 1) -> (batch_size, seqlen, 1)
                 values_BSH = pad_input(values_BSH.squeeze(0), indices=nnz_indices, batch=batch_size, seqlen=seqlen)
 
@@ -518,6 +546,7 @@ def get_llm_for_sequence_regression(
     use_flash_attention_2=False,
     init_value_head: bool = False,
     value_head_prefix="value_head",
+    q_head_prefix="q_head",
     device_map=None,
     sequence_parallel_size=1,
     use_sample_packing: bool = False,
@@ -546,6 +575,7 @@ def get_llm_for_sequence_regression(
         base_pretrained_class,
         base_class,
         value_head_prefix,
+        q_head_prefix,
         sequence_parallel_size=sequence_parallel_size,
         use_sample_packing=use_sample_packing,
     )
@@ -590,7 +620,7 @@ def get_llm_for_sequence_regression(
                     module = module.to(torch.bfloat16)
                 if "norm" in name:
                     module = module.to(torch.float32)
-                if value_head_prefix in name or "embed_tokens" in name:
+                if value_head_prefix in name or q_head_prefix in name or "embed_tokens" in name:
                     if hasattr(module, "weight"):
                         module = module.to(torch.bfloat16)
 
@@ -608,5 +638,7 @@ def get_llm_for_sequence_regression(
     if init_value_head:
         value_head = getattr(model, value_head_prefix)
         value_head.weight.data.normal_(mean=0.0, std=1 / (config.hidden_size + 1))
+        q_head = getattr(model, q_head_prefix)
+        q_head.weight.data.normal_(mean=0.0, std=1 / (config.hidden_size + 1))
 
     return model

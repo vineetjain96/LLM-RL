@@ -143,6 +143,7 @@ class MegatronStrategy(DistributedStrategy):
         optimizer: Optional[DistributedOptimizer] = None,
         scheduler: Optional[OptimizerParamScheduler] = None,
         tokenizer: Optional[PreTrainedTokenizer] = None,
+        save_optimizer_states: bool = True,
     ):
         # Extract base model.
         model: List[nn.Module] = model.actor_module
@@ -163,7 +164,7 @@ class MegatronStrategy(DistributedStrategy):
         model_sharded_state_dict = unwrapped_model.sharded_state_dict()
         if not self.is_lora:
             sharded_state_dict["model"] = model_sharded_state_dict
-        if optimizer:
+        if optimizer and save_optimizer_states:
             sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(model_sharded_state_dict)
         if scheduler:
             sharded_state_dict["lr_scheduler"] = scheduler.state_dict()

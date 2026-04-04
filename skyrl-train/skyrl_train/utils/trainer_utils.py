@@ -676,13 +676,23 @@ def build_dataloader(
     seeded_generator = torch.Generator()
     seeded_generator.manual_seed(cfg.trainer.seed)
 
+    dataloader_num_workers = cfg.data.get("dataloader_num_workers", None)
+    if dataloader_num_workers is None:
+        dataloader_num_workers = 0 if cfg.generator.enable_http_endpoint else 8
+    if dataloader_num_workers < 0:
+        dataloader_num_workers = 0
+    logger.info(
+        f"Building {'train' if is_train else 'eval'} dataloader with batch_size="
+        f"{batch_size if not is_fully_async else 1}, num_workers={dataloader_num_workers}"
+    )
+
     dataloader = StatefulDataLoader(
         dataset,
         batch_size=batch_size if not is_fully_async else 1,
         shuffle=True if is_train else False,
         collate_fn=dataset.collate_fn,
         # TODO(Charlie): debug why inference http endpoint is slow when num_workers is 8
-        num_workers=0 if cfg.generator.enable_http_endpoint else 8,
+        num_workers=dataloader_num_workers,
         drop_last=True if is_train else False,
         generator=seeded_generator,
     )

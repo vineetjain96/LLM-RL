@@ -368,6 +368,7 @@ def test_generator_output_concatenation():
         # optional but present in the signature
         "trajectory_ids",
         "is_last_step",
+        "step_metadata",
     ]
     assert set(GeneratorOutput.__annotations__.keys()) == set(expected_fields), (
         "GeneratorOutput fields are not what we expect. "
@@ -382,6 +383,7 @@ def test_generator_output_concatenation():
         "loss_masks": [[1, 1], [1, 1]],
         "stop_reasons": ["stop", "stop"],
         "rollout_logprobs": [[0.1, 0.2], [0.3, 0.4]],
+        "step_metadata": [{"parsed_action": "left"}, {"parsed_action": "right"}],
     }
 
     generator_output_2: GeneratorOutput = {
@@ -391,6 +393,7 @@ def test_generator_output_concatenation():
         "loss_masks": [[1, 1, 1], [1]],
         "stop_reasons": ["stop", "stop"],
         "rollout_logprobs": [[0.5, 0.6, 0.7], [0.8]],
+        "step_metadata": [{"parsed_action": "done"}, {"parsed_action": "pickup"}],
     }
 
     generator_outputs = [generator_output_1, generator_output_2]
@@ -402,6 +405,12 @@ def test_generator_output_concatenation():
     assert concatenated_output["loss_masks"] == [[1, 1], [1, 1], [1, 1, 1], [1]]
     assert concatenated_output["stop_reasons"] == ["stop", "stop", "stop", "stop"]
     assert concatenated_output["rollout_logprobs"] == [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6, 0.7], [0.8]]
+    assert concatenated_output["step_metadata"] == [
+        {"parsed_action": "left"},
+        {"parsed_action": "right"},
+        {"parsed_action": "done"},
+        {"parsed_action": "pickup"},
+    ]
 
     # Validate rollout metrics
     expected_rollout_metrics = {
@@ -1396,10 +1405,18 @@ async def test_step_wise_trajectories_trajectory_ids(mock_make, mock_tokenizer, 
             self.turns += 1
             if self.turns == 1:
                 return BaseTextEnvStepOutput(
-                    observations=[{"role": "user", "content": "obs1"}], reward=0.5, done=False, metadata={}
+                    observations=[{"role": "user", "content": "obs1"}],
+                    reward=0.5,
+                    done=False,
+                    metadata={"parsed_action": "turn left", "valid_action": True, "success": False, "steps": 1},
                 )
             else:
-                return BaseTextEnvStepOutput(observations=[], reward=1.0, done=True, metadata={})
+                return BaseTextEnvStepOutput(
+                    observations=[],
+                    reward=1.0,
+                    done=True,
+                    metadata={"parsed_action": "done", "valid_action": True, "success": True, "steps": 2},
+                )
 
     def mock_make_func(*args, **kwargs):
         return MultiStepEnv()
@@ -1517,10 +1534,28 @@ async def test_step_wise_trajectories_basic_output_validation(mock_make, mock_to
             self.turns += 1
             if self.turns == 1:
                 return BaseTextEnvStepOutput(
-                    observations=[{"role": "user", "content": "obs1"}], reward=0.5, done=False, metadata={}
+                    observations=[{"role": "user", "content": "obs1"}],
+                    reward=0.5,
+                    done=False,
+                    metadata={
+                        "parsed_action": "turn left",
+                        "valid_action": True,
+                        "success": False,
+                        "steps": 1,
+                    },
                 )
             else:
-                return BaseTextEnvStepOutput(observations=[], reward=1.0, done=True, metadata={})
+                return BaseTextEnvStepOutput(
+                    observations=[],
+                    reward=1.0,
+                    done=True,
+                    metadata={
+                        "parsed_action": "done",
+                        "valid_action": True,
+                        "success": True,
+                        "steps": 2,
+                    },
+                )
 
     mock_make.return_value = MultiStepEnv()
 
@@ -1571,6 +1606,7 @@ async def test_step_wise_trajectories_basic_output_validation(mock_make, mock_to
         "rollout_logprobs",
         "trajectory_ids",
         "is_last_step",
+        "step_metadata",
     ]
     for field in required_fields:
         assert field in generator_output, f"Required field '{field}' missing from output"
@@ -1598,6 +1634,9 @@ async def test_step_wise_trajectories_basic_output_validation(mock_make, mock_to
     assert (
         len(generator_output["is_last_step"]) == num_steps
     ), f"Expected {num_steps} is_last_step, got {len(generator_output['is_last_step'])}"
+    assert (
+        len(generator_output["step_metadata"]) == num_steps
+    ), f"Expected {num_steps} step_metadata entries, got {len(generator_output['step_metadata'])}"
 
     # Validate is_last_step: only the last step should be True
     assert generator_output["is_last_step"] == [
@@ -1627,3 +1666,8 @@ async def test_step_wise_trajectories_basic_output_validation(mock_make, mock_to
     # Validate stop_reasons
     for i, stop_reason in enumerate(generator_output["stop_reasons"]):
         assert isinstance(stop_reason, str), f"stop_reasons[{i}] should be a string"
+
+    assert generator_output["step_metadata"][0]["parsed_action"] == "turn left"
+    assert generator_output["step_metadata"][0]["valid_action"] is True
+    assert generator_output["step_metadata"][1]["parsed_action"] == "done"
+    assert generator_output["step_metadata"][1]["success"] is True

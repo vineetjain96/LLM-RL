@@ -12,6 +12,7 @@ import ray
 import torch
 import torch.distributed
 import torch.nn as nn
+import torch.nn.functional as F
 from loguru import logger
 from omegaconf import DictConfig
 from ray import ObjectRef
@@ -818,14 +819,15 @@ class PolicyWorkerBase(Worker):
         """
         torch.distributed.barrier()
 
-    def save_checkpoint(self, ckpt_dir: Path, tokenizer=None):
+    def save_checkpoint(self, ckpt_dir: Path, tokenizer=None, save_optimizer_states: bool = True):
         self.strategy.save_checkpoint(
             model=self.model,
-            optimizer=self.optimizer,
+            optimizer=self.optimizer if save_optimizer_states else None,
             scheduler=self.scheduler,
             ckpt_dir=ckpt_dir,
             node_local_rank=self.get_node_local_rank(),
             tokenizer=tokenizer,
+            save_optimizer_states=save_optimizer_states,
         )
 
     def load_checkpoint(
@@ -887,6 +889,22 @@ class CriticWorkerBase(Worker):
         self.mesh_rank: MeshRank = None
         self.critic_loss_fn: Callable = ppo_critic_loss
 
+    @property
+    def uses_state_action_td(self) -> bool:
+        return self.cfg.trainer.algorithm.advantage_estimator == "state_action_td"
+
+    def _reduce_state_action_loss(
+        self, values: torch.Tensor, targets: torch.Tensor, valid_mask: torch.Tensor
+    ) -> torch.Tensor:
+        loss_type = self.cfg.trainer.algorithm.state_action.critic_loss_type
+        if loss_type == "smooth_l1":
+            per_sample_loss = F.smooth_l1_loss(values, targets, reduction="none")
+        elif loss_type == "mse":
+            per_sample_loss = F.mse_loss(values, targets, reduction="none")
+        else:
+            raise ValueError(f"Unsupported state_action critic_loss_type: {loss_type}")
+        return masked_mean(per_sample_loss, valid_mask)
+
     def _normalize_mini_batch_size(self):
         """
         Initialize micro batch tracking for gradient accumulation.
@@ -944,6 +962,49 @@ class CriticWorkerBase(Worker):
         self.model.train()
 
         experience.to_device(torch.cuda.current_device())
+
+        if self.uses_state_action_td:
+            sequences = experience.sequences
+            attention_mask = experience.attention_mask
+            loss_mask = experience.loss_mask
+            state_index = experience.state_index
+            action_end_index = experience.action_end_index
+            next_state_index = experience.next_state_index
+            q_targets = experience.q_targets
+            v_targets = experience.v_targets
+            valid_mask = (loss_mask.sum(dim=-1) > 0).float()
+
+            with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
+                critic_outputs = self.model(
+                    sequences,
+                    attention_mask=attention_mask,
+                    state_index=state_index,
+                    action_end_index=action_end_index,
+                    next_state_index=next_state_index,
+                )
+                q_values = critic_outputs["q_values"]
+                v_values = critic_outputs["v_values"]
+                q_loss = self._reduce_state_action_loss(q_values, q_targets, valid_mask)
+                v_loss = self._reduce_state_action_loss(v_values, v_targets, valid_mask)
+                loss = (
+                    self.cfg.trainer.algorithm.state_action.q_loss_coef * q_loss
+                    + self.cfg.trainer.algorithm.state_action.v_loss_coef * v_loss
+                )
+
+            self.strategy.backward(loss, self.model, self.optimizer)
+
+            status = {
+                "critic_loss": loss.item(),
+                "q_loss": q_loss.item(),
+                "v_loss": v_loss.item(),
+                "q_values_mean": masked_mean(q_values, valid_mask).item(),
+                "v_values_mean": masked_mean(v_values, valid_mask).item(),
+                "q_targets_mean": masked_mean(q_targets, valid_mask).item(),
+                "v_targets_mean": masked_mean(v_targets, valid_mask).item(),
+                "critic_lr": self.scheduler.get_last_lr()[0],
+            }
+            status = self.strategy.all_reduce(status)
+            return status
 
         sequences = experience.sequences
         old_values = experience.values
@@ -1032,10 +1093,29 @@ class CriticWorkerBase(Worker):
         """Generates critic values."""
         device = torch.cuda.current_device()
         micro_batch.to(device)
-        sequences = micro_batch["sequences"]
-        response_length = micro_batch.metadata["response_length"]
-        attention_mask = micro_batch["attention_mask"]
         self.model.eval()
+        sequences = micro_batch["sequences"]
+        attention_mask = micro_batch["attention_mask"]
+
+        if self.uses_state_action_td:
+            state_index = micro_batch["state_index"]
+            action_end_index = micro_batch["action_end_index"]
+            next_state_index = micro_batch["next_state_index"]
+            with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
+                critic_outputs = self.model(
+                    sequences,
+                    attention_mask=attention_mask,
+                    state_index=state_index,
+                    action_end_index=action_end_index,
+                    next_state_index=next_state_index,
+                )
+            critic_outputs = {key: value.to("cpu") for key, value in critic_outputs.items()}
+            output = TrainingOutputBatch(critic_outputs)
+            output.metadata = micro_batch.metadata
+            self.model.train()
+            return output
+
+        response_length = micro_batch.metadata["response_length"]
         with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
             value = self.model(
                 sequences,
@@ -1058,14 +1138,15 @@ class CriticWorkerBase(Worker):
             tokenizer=tokenizer,
         )
 
-    def save_checkpoint(self, ckpt_dir: str, tokenizer=None):
+    def save_checkpoint(self, ckpt_dir: str, tokenizer=None, save_optimizer_states: bool = True):
         self.strategy.save_checkpoint(
             model=self.model,
-            optimizer=self.optimizer,
+            optimizer=self.optimizer if save_optimizer_states else None,
             scheduler=self.scheduler,
             ckpt_dir=ckpt_dir,
             node_local_rank=self.get_node_local_rank(),
             tokenizer=tokenizer,
+            save_optimizer_states=save_optimizer_states,
         )
 
     def load_checkpoint(self, ckpt_dir=None, load_optimizer_states=True, load_lr_scheduler_states=True):

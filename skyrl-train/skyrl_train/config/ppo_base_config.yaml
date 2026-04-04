@@ -8,6 +8,9 @@ defaults:
 data:
   train_data: ["${oc.env:HOME}/data/gsm8k/train.parquet"]
   val_data: ["${oc.env:HOME}/data/gsm8k/validation.parquet"]
+  keep_in_memory: true # Load datasets fully into RAM (faster, higher memory)
+  dataset_num_workers: 8 # Workers for dataset filtering/tokenization
+  dataloader_num_workers: null # Null = default (0 if HTTP endpoint enabled else 8)
 
 trainer:
   placement:
@@ -90,7 +93,7 @@ trainer:
     # pass through kwargs to the HuggingFace model config (i.e. for overriding vocab size, etc)
     model_config_kwargs: {}
   algorithm:
-    advantage_estimator: "grpo"  # "grpo", "gae", "rloo", "reinforce++", or customizable with AdvantageEstimatorRegistry
+    advantage_estimator: "grpo"  # "grpo", "gae", "rloo", "reinforce++", "state_action_td", or customizable with AdvantageEstimatorRegistry
     kl_ctrl: # only used if use_kl_in_reward is true (not applied in the case of use_kl_loss=true) - uses kl_loss_coef as the initial KL coefficient
       type: "fixed" # "fixed" or "adaptive"
       kl_target: 0.1 # target KL divergence for adaptive KL controller
@@ -128,6 +131,11 @@ trainer:
     
     # value loss parameters
     value_clip: 0.2
+    state_action:
+      q_head_prefix: "q_head"
+      q_loss_coef: 1.0
+      v_loss_coef: 1.0
+      critic_loss_type: "smooth_l1"
     dynamic_sampling:
       type: null # filter, replace, or null
       max_sample_batches: 30 # sample at most this many batches before stopping, -1 to sample forever
@@ -172,6 +180,8 @@ trainer:
   ckpt_path: "${oc.env:HOME}/ckpts/" # Path for resumable training checkpoints (model state, optimizer state, etc.)
   max_ckpts_to_keep: -1 # -1 to keep all checkpoints, N to keep the last N checkpoints
   ckpt_interval: 10  # Save full training checkpoint every `ckpt_interval` steps.
+  save_optimizer_state_in_ckpt: true  # If false, checkpoints skip optimizer state to reduce host RAM spikes.
+  save_dataloader_state_in_ckpt: true  # If false, do not serialize dataloader state in checkpoints.
   hf_save_interval: -1  # Save HF format model(s)every `hf_save_interval` steps.
   export_path: "${oc.env:HOME}/exports/" # Path for exported artifacts (HF models, debug dumps, etc.)
   bf16: true

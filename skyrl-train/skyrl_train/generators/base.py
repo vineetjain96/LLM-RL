@@ -41,6 +41,7 @@ class GeneratorOutput(TypedDict):
     trajectory_ids: Optional[List[TrajectoryID]]
     # Applicable only for step-wise training
     is_last_step: Optional[List[bool]]
+    step_metadata: Optional[List[Dict[str, Any]]]
 
 
 class MetricsOutput(TypedDict):

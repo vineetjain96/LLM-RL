@@ -127,6 +127,119 @@ class RayPPOTrainer:
         """Check if critic model is configured."""
         return bool(self.cfg.trainer.critic.model.path)
 
+    @property
+    def uses_state_action_td(self) -> bool:
+        return self.cfg.trainer.algorithm.advantage_estimator == "state_action_td"
+
+    @staticmethod
+    def _last_nonzero_index(mask: torch.Tensor) -> torch.Tensor:
+        mask = mask.to(dtype=torch.long)
+        has_any = mask.any(dim=-1)
+        flipped = torch.flip(mask, dims=[-1])
+        last_from_end = flipped.argmax(dim=-1)
+        last_index = mask.size(-1) - last_from_end - 1
+        return torch.where(has_any, last_index, torch.zeros_like(last_index))
+
+    def _annotate_state_action_step_fields(self, training_input: TrainingInputBatch) -> TrainingInputBatch:
+        if not self.uses_state_action_td:
+            return training_input
+        assert self.cfg.generator.step_wise_trajectories, "state_action_td requires step-wise trajectories"
+
+        from skyrl_gym.envs.babyai_text.utils import ACTION_MAP
+
+        step_metadata = list(training_input.metadata.get("step_metadata", []))
+        if len(step_metadata) < training_input.batch_size:
+            step_metadata.extend([{} for _ in range(training_input.batch_size - len(step_metadata))])
+            training_input.metadata["step_metadata"] = step_metadata
+
+        response_len = training_input["response_mask"].shape[1]
+        prompt_width = training_input["sequences"].shape[1] - response_len
+        loss_mask = training_input["loss_mask"]
+        response_mask = training_input["response_mask"]
+
+        state_index = torch.full((training_input.batch_size,), prompt_width - 1, dtype=torch.long)
+        action_end_index = prompt_width + self._last_nonzero_index(loss_mask > 0)
+        next_state_index = prompt_width + response_mask.sum(dim=-1).clamp(min=1).long() - 1
+        step_reward = training_input["rewards"].sum(dim=-1)
+        done = (
+            training_input["is_last_step"].to(dtype=torch.float32)
+            if training_input.get("is_last_step", None) is not None
+            else torch.zeros(training_input.batch_size, dtype=torch.float32)
+        )
+        bootstrap_mask = 1.0 - done
+
+        parsed_action_ids = []
+        action_valid = []
+        for idx, metadata in enumerate(step_metadata):
+            metadata = metadata or {}
+            parsed_action = metadata.get("parsed_action")
+            if isinstance(parsed_action, str):
+                parsed_action_ids.append(ACTION_MAP.get(parsed_action.lower(), -1))
+            else:
+                parsed_action_ids.append(-1)
+            if "valid_action" in metadata:
+                action_valid.append(float(bool(metadata["valid_action"])))
+            else:
+                action_valid.append(float(loss_mask[idx].sum().item() > 0))
+
+        training_input["state_index"] = state_index
+        training_input["action_end_index"] = action_end_index
+        training_input["next_state_index"] = next_state_index
+        training_input["step_reward"] = step_reward
+        training_input["done"] = done
+        training_input["bootstrap_mask"] = bootstrap_mask
+        training_input["parsed_action_id"] = torch.tensor(parsed_action_ids, dtype=torch.long)
+        training_input["action_valid"] = torch.tensor(action_valid, dtype=torch.float32)
+        return training_input
+
+    @torch.no_grad()
+    def _compute_state_action_td_advantages_and_targets(
+        self, data: TrainingInputBatch
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        gamma = self.cfg.trainer.algorithm.gamma
+        lambd = self.cfg.trainer.algorithm.lambd
+        q_values = data["q_values"].detach()
+        v_values = data["v_values"].detach()
+        next_v_values = data["next_v_values"].detach()
+        step_reward = data["step_reward"]
+        done = data["done"]
+        q_targets = step_reward + gamma * next_v_values * (1.0 - done)
+
+        v_targets = torch.zeros_like(v_values)
+        value_advantages = torch.zeros_like(v_values)
+        valid_step_mask = data["loss_mask"].sum(dim=-1) > 0
+        trajectory_ids = data.metadata.get("trajectory_ids")
+        assert trajectory_ids is not None, "state_action_td requires trajectory_ids metadata"
+
+        grouped_indices: Dict[str, List[int]] = defaultdict(list)
+        for idx, trajectory_id in enumerate(trajectory_ids):
+            if valid_step_mask[idx]:
+                grouped_indices[trajectory_id].append(idx)
+
+        for indices in grouped_indices.values():
+            last_gae = torch.tensor(0.0, device=v_values.device, dtype=v_values.dtype)
+            for idx in reversed(indices):
+                not_done = 1.0 - done[idx]
+                delta = step_reward[idx] + gamma * next_v_values[idx] * not_done - v_values[idx]
+                last_gae = delta + gamma * lambd * not_done * last_gae
+                value_advantages[idx] = last_gae
+                v_targets[idx] = v_values[idx] + last_gae
+
+        actor_advantages = q_values - v_values
+        if self.cfg.trainer.algorithm.advantage_batch_normalize and valid_step_mask.any():
+            valid_advantages = actor_advantages[valid_step_mask]
+            adv_mean = valid_advantages.mean()
+            adv_std = valid_advantages.std(unbiased=False).clamp(min=1e-8)
+            actor_advantages = torch.where(
+                valid_step_mask,
+                (actor_advantages - adv_mean) / adv_std,
+                torch.zeros_like(actor_advantages),
+            )
+
+        advantages = actor_advantages.unsqueeze(-1) * data["loss_mask"]
+        returns = v_targets.unsqueeze(-1) * data["loss_mask"]
+        return advantages, returns, q_targets, v_targets
+
     def _build_train_dataloader_and_compute_training_steps(self):
         """
         Hook for constructing the training dataloader. Subclasses can override
@@ -268,7 +381,7 @@ class RayPPOTrainer:
                             training_input.pop(key)
                         training_input.metadata.pop("uids")
 
-                        if self.cfg.trainer.algorithm.advantage_batch_normalize:
+                        if self.cfg.trainer.algorithm.advantage_batch_normalize and not self.uses_state_action_td:
                             training_input = normalize_advantages_dict(training_input)
 
                     if self.cfg.trainer.dump_data_batch:
@@ -634,6 +747,7 @@ class RayPPOTrainer:
             training_input.metadata["trajectory_ids"] = [
                 trajectory_id.to_string() for trajectory_id in generator_output["trajectory_ids"]
             ]
+            training_input.metadata["step_metadata"] = list(generator_output.get("step_metadata", []) or [])
             training_input.metadata["avg_response_length"] = sum(
                 len(sample_response_ids)
                 for sample_response_ids, is_last_step in zip(response_ids, generator_output["is_last_step"])
@@ -646,6 +760,7 @@ class RayPPOTrainer:
 
         logger.info(f"Number of sequences before padding: {len(training_input['sequences'])}")
         training_input = self.pad_batch(training_input)
+        training_input = self._annotate_state_action_step_fields(training_input)
         logger.info(f"Number of sequences after padding: {len(training_input['sequences'])}")
 
         return training_input
@@ -759,7 +874,13 @@ class RayPPOTrainer:
         """
         token_level_rewards = data["rewards"]
 
-        if self.cfg.generator.step_wise_trajectories:
+        if self.uses_state_action_td:
+            advantages, returns, q_targets, v_targets = self._compute_state_action_td_advantages_and_targets(data)
+            data["advantages"] = advantages
+            data["returns"] = returns
+            data["q_targets"] = q_targets
+            data["v_targets"] = v_targets
+        elif self.cfg.generator.step_wise_trajectories:
             is_last_step = data["is_last_step"].bool()
             response_mask = data["response_mask"]
             index = np.array(data.metadata["uids"])
@@ -791,6 +912,8 @@ class RayPPOTrainer:
             ), f"number of groups {num_groups} doesn't match the number of trajectories as given by `is_last_step` {len(last_step_advantages)}. The `is_last_step` tensor is likely malformed"
             advantages = last_step_advantages[traj_ids]
             returns = last_step_returns[traj_ids]
+            data["returns"] = returns
+            data["advantages"] = advantages
         else:
             advantages, returns = ppo_utils.compute_advantages_and_returns(
                 token_level_rewards=token_level_rewards,
@@ -803,8 +926,8 @@ class RayPPOTrainer:
                 lambd=self.cfg.trainer.algorithm.lambd,
                 grpo_norm_by_std=self.cfg.trainer.algorithm.grpo_norm_by_std,
             )
-        data["returns"] = returns
-        data["advantages"] = advantages
+            data["returns"] = returns
+            data["advantages"] = advantages
 
         # remove padding while calculating metrics
         pad_size = data.metadata.get("pad_size", 0)
@@ -820,7 +943,12 @@ class RayPPOTrainer:
         data = data.to("cpu")
 
         valid_advantages = torch.masked_select(
-            data["advantages"][: num_samples - pad_size, ...], data["response_mask"][: num_samples - pad_size].bool()
+            data["advantages"][: num_samples - pad_size, ...],
+            (
+                data["loss_mask"][: num_samples - pad_size].bool()
+                if self.uses_state_action_td
+                else data["response_mask"][: num_samples - pad_size].bool()
+            ),
         )
         avg_advantages: float = valid_advantages.mean().item()
         avg_advantages_abs: float = valid_advantages.abs().mean().item()
@@ -835,6 +963,29 @@ class RayPPOTrainer:
                 "avg_advantages_abs": avg_advantages_abs,
             }
         )
+
+        if self.uses_state_action_td:
+            valid_steps = data["loss_mask"][: num_samples - pad_size].sum(dim=-1) > 0
+            if valid_steps.any():
+                invalid_action_rate = 1.0 - data["action_valid"][: num_samples - pad_size][valid_steps].mean().item()
+                data.metadata["metrics"].update(
+                    {
+                        "avg_q_values": data["q_values"][: num_samples - pad_size][valid_steps].mean().item(),
+                        "avg_v_values": data["v_values"][: num_samples - pad_size][valid_steps].mean().item(),
+                        "avg_q_targets": data["q_targets"][: num_samples - pad_size][valid_steps].mean().item(),
+                        "avg_v_targets": data["v_targets"][: num_samples - pad_size][valid_steps].mean().item(),
+                        "invalid_action_rate": invalid_action_rate,
+                    }
+                )
+                self.all_metrics.update(
+                    {
+                        "loss/avg_q_values": data["q_values"][: num_samples - pad_size][valid_steps].mean().item(),
+                        "loss/avg_v_values": data["v_values"][: num_samples - pad_size][valid_steps].mean().item(),
+                        "loss/avg_q_targets": data["q_targets"][: num_samples - pad_size][valid_steps].mean().item(),
+                        "loss/avg_v_targets": data["v_targets"][: num_samples - pad_size][valid_steps].mean().item(),
+                        "environment/invalid_action_rate": invalid_action_rate,
+                    }
+                )
 
         logger.info(f"avg_final_rewards: {avg_rewards}, avg_response_length: {avg_response_length}")
         self.all_metrics.update(
@@ -886,8 +1037,13 @@ class RayPPOTrainer:
             new_training_input.metadata["trajectory_ids"] = training_input.metadata["trajectory_ids"] + [
                 f"pad{i}" for i in range(pad_size)
             ]
+        if "step_metadata" in training_input.metadata:
+            new_training_input.metadata["step_metadata"] = training_input.metadata["step_metadata"] + [
+                {"parsed_action": None, "valid_action": False, "success": False, "steps": 0}
+                for _ in range(pad_size)
+            ]
         for key, value in training_input.metadata.items():
-            if key not in ["uids", "trajectory_ids"]:
+            if key not in ["uids", "trajectory_ids", "step_metadata"]:
                 new_training_input.metadata[key] = copy.deepcopy(value)
         return new_training_input
 
@@ -912,15 +1068,30 @@ class RayPPOTrainer:
             - `["values"]`: Float[torch.Tensor, "batch_size seqlen"]
         """
         data_fwd_pass = training_input.select(keys=["sequences", "attention_mask"], metadata_keys=["response_length"])
+        critic_fwd_pass = (
+            training_input.select(
+                keys=["sequences", "attention_mask", "state_index", "action_end_index", "next_state_index"]
+            )
+            if self.uses_state_action_td
+            else data_fwd_pass
+        )
 
         values = None
+        q_values = None
+        v_values = None
+        next_v_values = None
         base_log_probs = None
         action_log_probs = None
 
         # Critic forward (dispatch handles offload/backload automatically)
         if self.has_critic:
-            critic_output = self.dispatch.forward("critic", data_fwd_pass)
-            values = critic_output["output"]
+            critic_output = self.dispatch.forward("critic", critic_fwd_pass)
+            if self.uses_state_action_td:
+                q_values = critic_output["q_values"]
+                v_values = critic_output["v_values"]
+                next_v_values = critic_output["next_v_values"]
+            else:
+                values = critic_output["output"]
 
         # Ref forward
         if self.ref_model is not None:
@@ -940,10 +1111,17 @@ class RayPPOTrainer:
         base_log_probs = base_log_probs[: len(sequences_all)] if base_log_probs is not None else None
         action_log_probs = action_log_probs[: len(sequences_all)]
         values = values[: len(sequences_all)] if values is not None else None
+        q_values = q_values[: len(sequences_all)] if q_values is not None else None
+        v_values = v_values[: len(sequences_all)] if v_values is not None else None
+        next_v_values = next_v_values[: len(sequences_all)] if next_v_values is not None else None
 
         training_input["base_action_log_probs"] = base_log_probs
         training_input["action_log_probs"] = action_log_probs
         training_input["values"] = values
+        if self.uses_state_action_td:
+            training_input["q_values"] = q_values
+            training_input["v_values"] = v_values
+            training_input["next_v_values"] = next_v_values
 
         if training_input.get("rollout_logprobs", None) is not None:
             # calculates the difference in probs between inference and trainer components
@@ -1184,22 +1362,37 @@ class RayPPOTrainer:
 
         io.makedirs(global_step_folder, exist_ok=True)
 
+        save_optimizer_state_in_ckpt = self.cfg.trainer.get("save_optimizer_state_in_ckpt", True)
+
         # Save policy checkpoint (dispatch handles offload/backload)
-        self.dispatch.save_checkpoint("policy", policy_save_dir, self.tokenizer)
+        self.dispatch.save_checkpoint(
+            "policy",
+            policy_save_dir,
+            self.tokenizer,
+            save_optimizer_states=save_optimizer_state_in_ckpt,
+        )
 
         # Save critic checkpoint (if it exists)
         if self.has_critic:
-            self.dispatch.save_checkpoint("critic", critic_save_dir, self.tokenizer)
+            self.dispatch.save_checkpoint(
+                "critic",
+                critic_save_dir,
+                self.tokenizer,
+                save_optimizer_states=save_optimizer_state_in_ckpt,
+            )
 
         # Save dataloader state
-        dataloader_save_path = os.path.join(global_step_folder, "data.pt")
-        try:
-            dataloader_state_dict = self.train_dataloader.state_dict()
-            with io.open_file(dataloader_save_path, "wb") as f:
-                torch.save(dataloader_state_dict, f)
-            logger.info(f"Saved dataloader state to {dataloader_save_path}")
-        except Exception as e:
-            logger.warning(f"Failed to save dataloader state: {e}")
+        if self.cfg.trainer.get("save_dataloader_state_in_ckpt", True):
+            dataloader_save_path = os.path.join(global_step_folder, "data.pt")
+            try:
+                dataloader_state_dict = self.train_dataloader.state_dict()
+                with io.open_file(dataloader_save_path, "wb") as f:
+                    torch.save(dataloader_state_dict, f)
+                logger.info(f"Saved dataloader state to {dataloader_save_path}")
+            except Exception as e:
+                logger.warning(f"Failed to save dataloader state: {e}")
+        else:
+            logger.info("Skipping dataloader state save because trainer.save_dataloader_state_in_ckpt=false")
 
         # Save additional trainer state
         trainer_state = {

@@ -45,3 +45,5 @@ docs/_spelling/
 
 # uv lock files
 uv.lock
+
+logs/

@@ -62,6 +62,19 @@ class BatchIterator:
             action_mask=batch["response_mask"],
             num_actions=batch.metadata["response_length"],  # int
             rollout_logprobs=batch["rollout_logprobs"] if "rollout_logprobs" in batch else None,
+            step_reward=batch["step_reward"] if "step_reward" in batch else None,
+            done=batch["done"] if "done" in batch else None,
+            bootstrap_mask=batch["bootstrap_mask"] if "bootstrap_mask" in batch else None,
+            state_index=batch["state_index"] if "state_index" in batch else None,
+            action_end_index=batch["action_end_index"] if "action_end_index" in batch else None,
+            next_state_index=batch["next_state_index"] if "next_state_index" in batch else None,
+            parsed_action_id=batch["parsed_action_id"] if "parsed_action_id" in batch else None,
+            action_valid=batch["action_valid"] if "action_valid" in batch else None,
+            q_values=batch["q_values"] if "q_values" in batch else None,
+            v_values=batch["v_values"] if "v_values" in batch else None,
+            next_v_values=batch["next_v_values"] if "next_v_values" in batch else None,
+            q_targets=batch["q_targets"] if "q_targets" in batch else None,
+            v_targets=batch["v_targets"] if "v_targets" in batch else None,
             # additional info
             # can be used to log metrics etc for micro-batches in the worker
             info={},

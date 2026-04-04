@@ -219,6 +219,26 @@ def validate_cfg(cfg: DictConfig):
             cfg.trainer.critic.model.path
         ), "`trainer.critic.model.path` should be provided for PPO training, got `None`"
 
+    if cfg.trainer.algorithm.advantage_estimator == "state_action_td":
+        assert cfg.trainer.strategy in (
+            "fsdp",
+            "fsdp2",
+        ), "state_action_td is only supported with FSDP/FSDP2 in v1"
+        assert cfg.trainer.critic.model.path, "state_action_td requires trainer.critic.model.path to be set"
+        assert cfg.generator.step_wise_trajectories, "state_action_td requires generator.step_wise_trajectories=true"
+        assert not cfg.generator.batched, "state_action_td requires generator.batched=false"
+        assert (
+            cfg.generator.use_conversation_multi_turn
+        ), "state_action_td requires generator.use_conversation_multi_turn=true"
+        assert cfg.environment.env_class == "babyai_text", "state_action_td is only supported for babyai_text in v1"
+        if cfg.trainer.algorithm.policy_loss_type == "regular" and cfg.trainer.algorithm.loss_reduction == "token_mean":
+            logger.warning(
+                "state_action_td works best with sequence-level policy updates. "
+                "Switching trainer.algorithm.policy_loss_type to 'gspo' and loss_reduction to 'sequence_mean'."
+            )
+            cfg.trainer.algorithm.policy_loss_type = "gspo"
+            cfg.trainer.algorithm.loss_reduction = "sequence_mean"
+
     assert not (
         cfg.trainer.algorithm.use_kl_in_reward and cfg.trainer.algorithm.use_kl_loss
     ), "use_kl_in_reward and use_kl_loss should be mutually exclusive"

@@ -142,7 +142,8 @@ class BasePPOExp:
             datasets=self.cfg.data.train_data,
             tokenizer=self.tokenizer,
             max_prompt_length=self.cfg.trainer.max_prompt_length,
-            num_workers=8,
+            num_workers=self.cfg.data.get("dataset_num_workers", 8),
+            keep_in_memory=self.cfg.data.get("keep_in_memory", True),
         )
         # make sure the dataset is large enough to train on
         assert (
@@ -161,7 +162,8 @@ class BasePPOExp:
                 datasets=self.cfg.data.val_data,
                 tokenizer=self.tokenizer,
                 max_prompt_length=self.cfg.trainer.max_prompt_length,
-                num_workers=8,
+                num_workers=self.cfg.data.get("dataset_num_workers", 8),
+                keep_in_memory=self.cfg.data.get("keep_in_memory", True),
             )
             return prompts_dataset
         return None

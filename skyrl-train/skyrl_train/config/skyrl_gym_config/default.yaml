@@ -17,6 +17,7 @@ search:
 
 babyai_text:
   env_name: "BabyAI-GoToLocal-v0"  # Default BabyAI environment
+  env_kwargs: {}                    # kwargs forwarded to gym.make(...), e.g. room_size, num_dists
   max_steps: 64                     # Maximum steps per episode
   language: "english"               # Language for text observations (english/french)
   render_mode: null                 # Set to "human" for visualization during debugging

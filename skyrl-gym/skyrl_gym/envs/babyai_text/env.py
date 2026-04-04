@@ -34,19 +34,28 @@ class BabyAITextEnv(BaseTextEnv):
     the mission is completed or the maximum number of turns is reached.
     """
 
-    def __init__(self, env_config: DictConfig, extras: Dict[str, Any] = {}):
+    def __init__(self, env_config: DictConfig, extras: Optional[Dict[str, Any]] = None):
         super().__init__()
+        extras = extras or {}
+        extra_info = extras.get("extra_info") or {}
 
         # Environment configuration
-        self.env_name = env_config.get("env_name", "BabyAI-GoToLocal-v0")
+        self.env_name = extra_info.get(
+            "env_name",
+            extras.get("env_name", env_config.get("env_name", "BabyAI-GoToLocal-v0")),
+        )
         self.max_steps = env_config.get("max_steps", 64)
         self.language = env_config.get("language", "english")
         self.render_mode = env_config.get("render_mode", None)
+        config_env_kwargs = dict(env_config.get("env_kwargs", {}) or {})
+        extra_env_kwargs = dict(extras.get("env_kwargs", {}) or {})
+        extra_info_env_kwargs = dict(extra_info.get("env_kwargs", {}) or {})
+        self.env_kwargs = {**config_env_kwargs, **extra_env_kwargs, **extra_info_env_kwargs}
 
         # Multi-turn settings
         self.max_turns = extras.get("max_turns", self.max_steps)
-        if "max_turns" in extras.get("extra_info", {}):
-            self.max_turns = int(extras["extra_info"]["max_turns"])
+        if "max_turns" in extra_info:
+            self.max_turns = int(extra_info["max_turns"])
 
         # Reward configuration
         reward_spec = extras.get("reward_spec", {})
@@ -57,7 +66,7 @@ class BabyAITextEnv(BaseTextEnv):
         self.mission_override = extras.get("mission", None)
 
         # Seed for reproducibility
-        self.seed = extras.get("seed", None)
+        self.seed = extra_info.get("seed", extras.get("seed", None))
 
         # Internal state
         self._env = None
@@ -84,7 +93,10 @@ class BabyAITextEnv(BaseTextEnv):
             except ImportError:
                 pass
 
-            self._env = gym.make(self.env_name, render_mode=self.render_mode)
+            make_kwargs = dict(self.env_kwargs)
+            if self.render_mode is not None and "render_mode" not in make_kwargs:
+                make_kwargs["render_mode"] = self.render_mode
+            self._env = gym.make(self.env_name, **make_kwargs)
 
             if self.seed is not None:
                 self._env.reset(seed=self.seed)
@@ -335,6 +347,7 @@ class BabyAITextEnv(BaseTextEnv):
             "steps": self._step_count,
             "success": self._success,
             "mission": self._mission,
+            "max_turns": self.max_turns,
         }
 
     @staticmethod

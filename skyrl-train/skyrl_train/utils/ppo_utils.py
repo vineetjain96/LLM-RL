@@ -430,6 +430,7 @@ class AdvantageEstimator(StrEnum):
     GRPO = "grpo"
     RLOO = "rloo"
     REINFORCE_PP = "reinforce++"
+    STATE_ACTION_TD = "state_action_td"
 
 
 class AdvantageEstimatorRegistry(BaseFunctionRegistry):
@@ -456,6 +457,7 @@ class AdvantageEstimatorRegistry(BaseFunctionRegistry):
             "gae": [AdvantageEstimator.GAE, compute_gae_advantage_return],
             "rloo": [AdvantageEstimator.RLOO, compute_rloo_outcome_advantage],
             "reinforce++": [AdvantageEstimator.REINFORCE_PP, compute_reinforce_plus_plus_outcome_advantage],
+            "state_action_td": [AdvantageEstimator.STATE_ACTION_TD, compute_state_action_td_placeholder],
         }
 
         for ae_name, (ae_type, ae_func) in ae_types.items():
@@ -1077,6 +1079,13 @@ def compute_grpo_outcome_advantage(
         scores = scores.unsqueeze(-1) * response_mask
 
     return scores, scores
+
+
+@register_advantage_estimator(AdvantageEstimator.STATE_ACTION_TD)
+def compute_state_action_td_placeholder(*args, **kwargs):
+    raise NotImplementedError(
+        "state_action_td advantages are computed inside RayPPOTrainer and should not reach the generic registry path."
+    )
 
 
 def repopulate_all_registries():

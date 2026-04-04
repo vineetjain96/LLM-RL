@@ -12,6 +12,7 @@ class PromptDataset:
         tokenizer: PreTrainedTokenizerBase,
         max_prompt_length: int,
         num_workers: int = 8,
+        keep_in_memory: bool = True,
         prompt_key: str = "prompt",
         env_class_key: str = "env_class",
     ):
@@ -20,6 +21,7 @@ class PromptDataset:
         self.prompt_key = prompt_key
         self.env_class_key = env_class_key
         self.num_workers = num_workers
+        self.keep_in_memory = keep_in_memory
 
         self.datasets = datasets
         if isinstance(self.datasets, str):
@@ -32,14 +34,14 @@ class PromptDataset:
         for source in self.datasets:
             ext = os.path.splitext(source)[-1].lower()
             if ext == ".parquet":
-                ds = datasets.load_dataset("parquet", data_files=source, keep_in_memory=True)["train"]
+                ds = datasets.load_dataset("parquet", data_files=source, keep_in_memory=self.keep_in_memory)["train"]
             elif ext in [".json", ".jsonl"]:
-                ds = datasets.load_dataset("json", data_files=source, keep_in_memory=True)["train"]
+                ds = datasets.load_dataset("json", data_files=source, keep_in_memory=self.keep_in_memory)["train"]
             else:
                 # Treat as HF dataset spec: "name" or "name:split"
                 dataset_name, has_split, split = source.partition(":")
                 try:
-                    ds_dict = datasets.load_dataset(path=dataset_name, keep_in_memory=True)
+                    ds_dict = datasets.load_dataset(path=dataset_name, keep_in_memory=self.keep_in_memory)
                 except ValueError:
                     raise ValueError(f"Dataset `{dataset_name}` not found on Hugging Face.")
                 split = split if has_split else "train"
@@ -57,10 +59,11 @@ class PromptDataset:
         # filter out too long prompts
         tokenizer = self.tokenizer
         prompt_key = self.prompt_key
+        num_proc = self.num_workers if self.num_workers and self.num_workers > 1 else None
         self.dataframe = self.dataframe.filter(
             lambda doc: len(tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=True))
             <= self.max_prompt_length,
-            num_proc=self.num_workers,
+            num_proc=num_proc,
             desc=f"Filtering prompts longer than {self.max_prompt_length} tokens",
         )
 

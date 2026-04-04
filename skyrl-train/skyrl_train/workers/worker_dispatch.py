@@ -187,13 +187,19 @@ class WorkerDispatch:
             self._actor_groups[model].async_run_ray_method("pass_through", "save_memory_snapshot", tag=f"{model}_{tag}")
         )
 
-    def save_checkpoint(self, model: str, ckpt_dir: str, tokenizer=None) -> None:
+    def save_checkpoint(
+        self, model: str, ckpt_dir: str, tokenizer=None, save_optimizer_states: bool = True
+    ) -> None:
         """Save checkpoint for model."""
         self._ensure_on_gpu(model, need_optimizer=True, need_model=True)
 
         ray.get(
             self._actor_groups[model].async_run_ray_method(
-                "pass_through", "save_checkpoint", ckpt_dir=ckpt_dir, tokenizer=tokenizer
+                "pass_through",
+                "save_checkpoint",
+                ckpt_dir=ckpt_dir,
+                tokenizer=tokenizer,
+                save_optimizer_states=save_optimizer_states,
             )
         )
 

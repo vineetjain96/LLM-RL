@@ -39,6 +39,7 @@ class TrajectoryOutput:
     prompt_ids: List[int]
     rollout_logprobs: Optional[List[float]]
     env_metrics: Dict[str, Any]
+    step_metadata: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -363,6 +364,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                     rollout_logprobs=turn_response_logprobs,
                     stop_reason=stop_reason,
                     env_metrics=env.get_metrics() if agent_loop_state.done else {},
+                    step_metadata=dict(env_step_output.get("metadata", {})),
                 )
                 agent_loop_output.step_outputs.append(per_step_output)
 
@@ -707,6 +709,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             is_last_step = []
             out_trajectory_ids = []
             out_env_classes = []
+            step_metadata = []
             for i, output in enumerate(all_outputs):
                 for j, step_output in enumerate(output.step_outputs):
                     responses.append(step_output.response_ids)
@@ -718,6 +721,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                     is_last_step.append(j == len(output.step_outputs) - 1)
                     out_trajectory_ids.append(trajectory_ids[i])
                     out_env_classes.append(env_classes[i])
+                    step_metadata.append(step_output.step_metadata or {})
             env_classes = out_env_classes
         else:
             responses = [output.response_ids for output in all_outputs]
@@ -728,6 +732,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             env_metrics = [output.env_metrics for output in all_outputs]
             is_last_step = None
             out_trajectory_ids = None
+            step_metadata = None
 
         if sampling_params is not None:
             # sampling params will be a dict in the format of the inference engine backend
@@ -766,6 +771,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             "rollout_logprobs": rollout_logprobs,
             "trajectory_ids": out_trajectory_ids,
             "is_last_step": is_last_step,
+            "step_metadata": step_metadata,
         }
 
         return generator_output

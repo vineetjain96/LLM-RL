@@ -333,6 +333,19 @@ class TrainingInput(TypedDict, total=False):
     kl: Float[torch.Tensor, "batch_size seq_len"]
     rewards: Optional[Float[torch.Tensor, "batch_size seq_len"]]
     rollout_logprobs: Optional[Float[torch.Tensor, "batch_size seq_len"]]
+    step_reward: Optional[Float[torch.Tensor, "batch_size"]]
+    done: Optional[Float[torch.Tensor, "batch_size"]]
+    bootstrap_mask: Optional[Float[torch.Tensor, "batch_size"]]
+    state_index: Optional[Integer[torch.Tensor, "batch_size"]]
+    action_end_index: Optional[Integer[torch.Tensor, "batch_size"]]
+    next_state_index: Optional[Integer[torch.Tensor, "batch_size"]]
+    parsed_action_id: Optional[Integer[torch.Tensor, "batch_size"]]
+    action_valid: Optional[Float[torch.Tensor, "batch_size"]]
+    q_values: Optional[Float[torch.Tensor, "batch_size"]]
+    v_values: Optional[Float[torch.Tensor, "batch_size"]]
+    next_v_values: Optional[Float[torch.Tensor, "batch_size"]]
+    q_targets: Optional[Float[torch.Tensor, "batch_size"]]
+    v_targets: Optional[Float[torch.Tensor, "batch_size"]]
 
 
 class TrainingInputBatch(TensorBatch[TrainingInput]):

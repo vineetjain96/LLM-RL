@@ -295,6 +295,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         assert self.cfg.generator.async_engine, "async_engine must be True for fully async training."
         # TODO(Charlie): we can support it, just multi-turn partial rollout but synchronous.
         assert not self.colocate_all, "colocate_all is not supported for async training yet."
+        assert (
+            self.cfg.trainer.algorithm.advantage_estimator != "state_action_td"
+        ), "state_action_td is only supported in the synchronous FSDP trainer in v1."
 
         # TODO(Charlie): need to assert we are doing TIS and returning logprobs
 

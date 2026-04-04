@@ -13,7 +13,7 @@ from skyrl_train.config.utils import get_default_config
 from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.training_batch import TrainingInputBatch
-from skyrl_train.utils.utils import validate_batch_sizes
+from skyrl_train.utils.utils import validate_batch_sizes, validate_cfg
 from skyrl_train.workers.worker import CriticWorkerBase, PolicyWorkerBase
 from skyrl_train.workers.worker_utils import BatchIterator
 
@@ -611,3 +611,103 @@ def test_validate_batch_sizes_lcm_dp_requirement():
     # Pass: ref disabled -> requirement reduces to policy_dp. With policy_dp=2, tbs=2 is valid.
     cfg = create_config(train_batch_size=2, policy_dp=2, ref_dp=3, include_ref=False)
     validate_batch_sizes(cfg)
+
+
+def test_state_action_td_advantages_and_targets(dummy_config, dummy_generator):
+    cfg = dummy_config
+    cfg.trainer.algorithm.advantage_estimator = "state_action_td"
+    cfg.trainer.algorithm.use_kl_loss = False
+    cfg.trainer.algorithm.use_kl_in_reward = False
+    cfg.trainer.algorithm.advantage_batch_normalize = False
+    cfg.trainer.algorithm.gamma = 0.9
+    cfg.trainer.algorithm.lambd = 0.8
+    cfg.trainer.critic.model.path = "dummy-critic"
+    cfg.trainer.strategy = "fsdp2"
+    cfg.generator.step_wise_trajectories = True
+    cfg.generator.use_conversation_multi_turn = True
+    cfg.generator.max_turns = 2
+    cfg.environment.env_class = "babyai_text"
+
+    trainer = RayPPOTrainer(
+        cfg=cfg,
+        tracker=None,
+        tokenizer=None,
+        train_dataset=DummyDataset(),
+        eval_dataset=DummyDataset(),
+        inference_engine_client=None,
+        generator=dummy_generator,
+    )
+
+    data = TrainingInputBatch(
+        {
+            "sequences": torch.tensor([[11, 12, 21, 22, 23], [11, 12, 31, 32, 33]], dtype=torch.long),
+            "response_mask": torch.tensor([[1, 1, 1], [1, 1, 1]], dtype=torch.long),
+            "loss_mask": torch.tensor([[1, 1, 0], [0, 1, 0]], dtype=torch.long),
+            "rewards": torch.tensor([[0.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=torch.float32),
+            "is_last_step": torch.tensor([False, True], dtype=torch.bool),
+        }
+    )
+    data.metadata = {
+        "uids": ["traj-0", "traj-0"],
+        "trajectory_ids": ["traj-0", "traj-0"],
+        "avg_response_length": 3.0,
+        "step_metadata": [
+            {"parsed_action": "turn left", "valid_action": True, "success": False, "steps": 1},
+            {"parsed_action": "done", "valid_action": False, "success": True, "steps": 2},
+        ],
+    }
+
+    data = trainer._annotate_state_action_step_fields(data)
+    assert data["state_index"].tolist() == [1, 1]
+    assert data["action_end_index"].tolist() == [3, 3]
+    assert data["next_state_index"].tolist() == [4, 4]
+    assert torch.allclose(data["step_reward"], torch.tensor([0.0, 1.0]))
+    assert torch.allclose(data["done"], torch.tensor([0.0, 1.0]))
+    assert torch.allclose(data["action_valid"], torch.tensor([1.0, 0.0]))
+    assert data["parsed_action_id"].tolist()[0] >= 0
+    assert data["parsed_action_id"].tolist()[1] >= 0
+
+    data["q_values"] = torch.tensor([0.6, 1.2], dtype=torch.float32)
+    data["v_values"] = torch.tensor([0.2, 0.8], dtype=torch.float32)
+    data["next_v_values"] = torch.tensor([0.5, 0.3], dtype=torch.float32)
+
+    data = trainer.compute_advantages_and_returns(data)
+
+    expected_advantages = torch.tensor([[0.4, 0.4, 0.0], [0.0, 0.4, 0.0]], dtype=torch.float32)
+    expected_returns = torch.tensor([[0.594, 0.594, 0.0], [0.0, 1.0, 0.0]], dtype=torch.float32)
+    expected_q_targets = torch.tensor([0.45, 1.0], dtype=torch.float32)
+    expected_v_targets = torch.tensor([0.594, 1.0], dtype=torch.float32)
+
+    assert torch.allclose(data["advantages"], expected_advantages, atol=1e-6)
+    assert torch.allclose(data["returns"], expected_returns, atol=1e-6)
+    assert torch.allclose(data["q_targets"], expected_q_targets, atol=1e-6)
+    assert torch.allclose(data["v_targets"], expected_v_targets, atol=1e-6)
+
+    metrics = data.metadata["metrics"]
+    assert metrics["avg_final_rewards"] == approx(1.0)
+    assert metrics["avg_advantages"] == approx(0.4)
+    assert metrics["avg_q_targets"] == approx(0.725)
+    assert metrics["avg_v_targets"] == approx(0.797)
+    assert metrics["invalid_action_rate"] == approx(0.5)
+
+
+def test_validate_cfg_state_action_td_sets_sequence_level_defaults(dummy_config):
+    cfg = dummy_config
+    cfg.trainer.algorithm.advantage_estimator = "state_action_td"
+    cfg.trainer.algorithm.use_kl_loss = False
+    cfg.trainer.algorithm.use_kl_in_reward = False
+    cfg.trainer.critic.model.path = "dummy-critic"
+    cfg.trainer.strategy = "fsdp2"
+    cfg.generator.async_engine = True
+    cfg.generator.batched = False
+    cfg.generator.step_wise_trajectories = True
+    cfg.generator.use_conversation_multi_turn = True
+    cfg.generator.max_turns = 2
+    cfg.generator.max_input_length = cfg.trainer.max_prompt_length
+    cfg.environment.env_class = "babyai_text"
+
+    with patch("skyrl_train.utils.utils.validate_batch_sizes"):
+        validate_cfg(cfg)
+
+    assert cfg.trainer.algorithm.policy_loss_type == "gspo"
+    assert cfg.trainer.algorithm.loss_reduction == "sequence_mean"
