@@ -62,7 +62,10 @@ from skyrl.train.utils import (
     get_ray_pg_ready_with_timeout,
     trainer_utils,
 )
-from skyrl.train.utils.logging_utils import log_example
+from skyrl.train.utils.logging_utils import (
+    decode_example_from_generator_output,
+    log_example,
+)
 from skyrl.train.utils.tracking import Tracking
 from skyrl.train.utils.trainer_utils import (
     GLOBAL_STEP_PREFIX,
@@ -362,12 +365,16 @@ class RayPPOTrainer:
                         generator_output = self.postprocess_generator_output(generator_output, uids)
 
                     # 2. print example just for debugging
-                    vis = self.tokenizer.decode(generator_output["response_ids"][0])
+                    example_prompt, example_response, example_reward = decode_example_from_generator_output(
+                        self.tokenizer,
+                        generator_output,
+                        step_wise=self.cfg.generator.step_wise_trajectories,
+                    )
                     log_example(
                         logger,
-                        prompt=generator_input["prompts"][0],
-                        response=vis,
-                        reward=generator_output["rewards"][0],
+                        prompt=example_prompt,
+                        response=example_response,
+                        reward=example_reward,
                     )
 
                     # 3. Convert GeneratorOutput to TrainingInputBatch
@@ -1038,12 +1045,24 @@ class RayPPOTrainer:
         data_save_dir.mkdir(parents=True, exist_ok=True)
         data.save(data_save_dir / f"{file_name}.pkl")
 
-    def pad_batch(self, training_input: TrainingInputBatch) -> TrainingInputBatch:
-        """Pad the batch to be divisible by dp size"""
-        import math
+    def _get_required_batch_multiple(self) -> int:
+        """Return the batch-size multiple required by dispatch and optimizer staging."""
+        required_multiple = 1
 
-        dp_size = self.dispatch.get_lcm_dp_size()
-        pad_size = math.ceil(training_input.batch_size / dp_size) * dp_size - training_input.batch_size
+        if self.dispatch is not None:
+            required_multiple = math.lcm(required_multiple, self.dispatch.get_lcm_dp_size())
+
+        n_samples = self.cfg.generator.n_samples_per_prompt
+        required_multiple = math.lcm(required_multiple, self.cfg.trainer.policy_mini_batch_size * n_samples)
+        if self.has_critic:
+            required_multiple = math.lcm(required_multiple, self.cfg.trainer.critic_mini_batch_size * n_samples)
+
+        return required_multiple
+
+    def pad_batch(self, training_input: TrainingInputBatch) -> TrainingInputBatch:
+        """Pad the batch to satisfy DP sharding and mini-batch staging requirements."""
+        required_multiple = self._get_required_batch_multiple()
+        pad_size = math.ceil(training_input.batch_size / required_multiple) * required_multiple - training_input.batch_size
         new_tensors = {}
         training_input.metadata["pad_size"] = pad_size
         if pad_size == 0:
@@ -1058,9 +1077,10 @@ class RayPPOTrainer:
                     # ensures that padding tensors don't count towards the loss
                     padding_tensor = torch.zeros(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
                 else:
-                    # ensures all padding tensors are in a valid format by cloning `pad_size` from the original input
-                    # `pad_size` is guaranteed to be smaller than batch_size
-                    padding_tensor = tensor[:pad_size].clone()
+                    # Clone existing entries so indices and token layouts stay valid for model forwards,
+                    # even when we need more padding rows than the original batch size.
+                    repeat_indices = torch.arange(pad_size, device=tensor.device) % tensor.shape[0]
+                    padding_tensor = tensor.index_select(0, repeat_indices).clone()
                 new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
 
         new_training_input = TrainingInputBatch(new_tensors)

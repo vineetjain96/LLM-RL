@@ -123,6 +123,11 @@ def test_temperature_propagation():
     assert cfg.trainer.algorithm.temperature == 0.7
 
 
+def test_cli_overrides_logger_list():
+    cfg = SkyRLTrainConfig.from_cli_overrides(["trainer.logger=[wandb,console]"])
+    assert cfg.trainer.logger == ["wandb", "console"]
+
+
 def test_babyai_typed_config_overrides():
     cfg = SkyRLTrainConfig.from_cli_overrides(
         [
@@ -137,6 +142,26 @@ def test_babyai_typed_config_overrides():
     assert cfg.environment.skyrl_gym.babyai_text.env_name == "BabyAI-GoToObj-v0"
     assert cfg.environment.skyrl_gym.babyai_text.max_steps == 32
     assert cfg.environment.skyrl_gym.babyai_text.env_kwargs["room_size"] == 8
+
+
+def test_state_action_typed_config_overrides():
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "trainer.algorithm.advantage_estimator=state_action_td",
+            "trainer.algorithm.state_action.q_head_prefix=custom_q_head",
+            "trainer.algorithm.state_action.q_loss_coef=0.7",
+            "trainer.algorithm.state_action.v_loss_coef=1.3",
+            "trainer.algorithm.state_action.critic_loss_type=mse",
+            "trainer.algorithm.state_action.critic_head_bias=true",
+        ]
+    )
+
+    assert cfg.trainer.algorithm.advantage_estimator == "state_action_td"
+    assert cfg.trainer.algorithm.state_action.q_head_prefix == "custom_q_head"
+    assert cfg.trainer.algorithm.state_action.q_loss_coef == 0.7
+    assert cfg.trainer.algorithm.state_action.v_loss_coef == 1.3
+    assert cfg.trainer.algorithm.state_action.critic_loss_type == "mse"
+    assert cfg.trainer.algorithm.state_action.critic_head_bias is True
 
 
 def test_legacy_config_translation():

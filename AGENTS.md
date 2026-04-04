@@ -30,7 +30,7 @@ Namespaces are one honking great idea -- let's do more of those!
 ## Running code
 - **Modules and environment**: before running the code, you need to activate the environment. 
 ```
-module load cuda/12.6 cudnn gcc arrow/18.1.0 httpproxy
+module load cuda/12.6 cudnn gcc httpproxy
 source /home/v/vinjain/scratch/.virtualenvs/skyrl/bin/activate
 ```
 - **Adding dependencies**: add to `pyproject.toml` and run `uv sync --all-extras` to install and lock them.

@@ -4,11 +4,13 @@ uv run --isolated --extra dev pytest tests/train/utils/test_logging_utils.py
 
 import pytest
 
+from skyrl.train.generators.base import TrajectoryID
 from skyrl.train.utils.logging_utils import (
     BASE_PROMPT_COLOR,
     NEGATIVE_RESPONSE_COLOR,
     POSITIVE_RESPONSE_COLOR,
     _color_block_format_and_kwargs,
+    decode_example_from_generator_output,
     log_example,
 )
 
@@ -29,6 +31,11 @@ class StubLogger:
         self.last_message = msg
         self.last_args = args
         self.last_kwargs = kwargs
+
+
+class StubTokenizer:
+    def decode(self, token_ids):
+        return " ".join(str(token_id) for token_id in token_ids)
 
 
 def test_color_block_format_and_kwargs_single_line():
@@ -120,3 +127,50 @@ def test_log_example_handles_exceptions_gracefully(monkeypatch, capsys):
     assert "Input: [{'role': 'user', 'content': 'p'}]" in captured.out
     assert "Output (Total Reward: N/A):" in captured.out
     assert "r" in captured.out
+
+
+def test_decode_example_from_generator_output_non_stepwise_uses_prompt_token_ids():
+    tokenizer = StubTokenizer()
+    generator_output = {
+        "prompt_token_ids": [[1, 2, 3]],
+        "response_ids": [[4, 5]],
+        "rewards": [1.25],
+    }
+
+    prompt, response, reward = decode_example_from_generator_output(tokenizer, generator_output, step_wise=False)
+
+    assert prompt == "1 2 3"
+    assert response == "4 5"
+    assert reward == 1.25
+
+
+def test_decode_example_from_generator_output_stepwise_reconstructs_full_trajectory():
+    tokenizer = StubTokenizer()
+    generator_output = {
+        "prompt_token_ids": [
+            [10, 11],
+            [10, 11, 12, 13],
+            [20, 21],
+        ],
+        "response_ids": [
+            [12, 13],
+            [14, 15],
+            [22, 23],
+        ],
+        "rewards": [
+            [0.0, 1.0],
+            [0.0, 2.0],
+            [0.0, 3.0],
+        ],
+        "trajectory_ids": [
+            TrajectoryID(instance_id="traj_a", repetition_id=0),
+            TrajectoryID(instance_id="traj_a", repetition_id=0),
+            TrajectoryID(instance_id="traj_b", repetition_id=0),
+        ],
+    }
+
+    prompt, response, reward = decode_example_from_generator_output(tokenizer, generator_output, step_wise=True)
+
+    assert prompt == "10 11"
+    assert response == "12 13 14 15"
+    assert reward == [0.0, 1.0, 0.0, 2.0]

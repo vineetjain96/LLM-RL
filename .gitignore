@@ -128,3 +128,6 @@ tinker.db
 
 # Alembic - don't track pycache
 tx/tinker/alembic/__pycache__/
+
+# notes I write down
+*.txt

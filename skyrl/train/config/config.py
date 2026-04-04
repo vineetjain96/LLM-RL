@@ -297,6 +297,15 @@ class CISPOConfig(BaseConfig):
     """Offset for upper bound of importance sampling ratio clipping (as opposed to PPO token update clipping)."""
 
 
+@dataclass
+class StateActionConfig(BaseConfig):
+    q_head_prefix: str = "q_head"
+    q_loss_coef: float = 1.0
+    v_loss_coef: float = 1.0
+    critic_loss_type: str = "smooth_l1"
+    critic_head_bias: bool = False
+
+
 # see https://docs.skyrl.ai/docs/algorithms/off_policy_correction for more details
 @dataclass
 class OffPolicyCorrectionConfig(BaseConfig):
@@ -371,6 +380,7 @@ class AlgorithmConfig(BaseConfig):
     off_policy_correction: OffPolicyCorrectionConfig = field(default_factory=OffPolicyCorrectionConfig)
     sapo: SAPOConfig = field(default_factory=SAPOConfig)
     value_clip: float = 0.2
+    state_action: StateActionConfig = field(default_factory=StateActionConfig)
     dynamic_sampling: DynamicSamplingConfig = field(default_factory=DynamicSamplingConfig)
     clip_cov: ClipCovConfig = field(default_factory=ClipCovConfig)
     """Only used when ``policy_loss_type="clip_cov"``."""
@@ -621,7 +631,7 @@ class TrainerConfig(BaseConfig):
     disable_fast_tokenizer: bool = False
     project_name: str = "skyrl"
     run_name: str = "test_run"
-    logger: str = "wandb"
+    logger: Union[str, List[str]] = "wandb"
     dump_data_batch: bool = False
     dump_eval_results: bool = True
     rope_scaling: Optional[Dict[str, Any]] = None

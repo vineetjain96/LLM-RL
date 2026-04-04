@@ -144,14 +144,14 @@ class BabyAITextEnv(BaseTextEnv):
         image = self._obs["image"]
         descriptions = []
 
-        # Agent is at center (3, 3) facing forward
-        # Generate descriptions for visible cells
         view_size = image.shape[0]
-        center = view_size // 2
+        # MiniGrid places the agent at the bottom-center of the egocentric view.
+        agent_x = view_size // 2
+        agent_y = view_size - 1
 
         # Check what's directly in front
-        for dist in range(1, center + 1):
-            cell = image[center - dist, center]
+        for dist in range(1, agent_y + 1):
+            cell = image[agent_x, agent_y - dist]
             obj_type, obj_color, _ = cell[0], cell[1], cell[2]
 
             if obj_type > 1:  # Not unseen or empty
@@ -162,8 +162,8 @@ class BabyAITextEnv(BaseTextEnv):
                     descriptions.append(f"You see a {obj_name} {dist} step(s) ahead.")
 
         # Check left side
-        for dist in range(1, center + 1):
-            cell = image[center, center - dist]
+        for dist in range(1, agent_x + 1):
+            cell = image[agent_x - dist, agent_y]
             obj_type, obj_color, _ = cell[0], cell[1], cell[2]
 
             if obj_type > 1:
@@ -174,8 +174,8 @@ class BabyAITextEnv(BaseTextEnv):
                     descriptions.append(f"You see a {obj_name} {dist} step(s) to your left.")
 
         # Check right side
-        for dist in range(1, center + 1):
-            cell = image[center, center + dist]
+        for dist in range(1, view_size - agent_x):
+            cell = image[agent_x + dist, agent_y]
             obj_type, obj_color, _ = cell[0], cell[1], cell[2]
 
             if obj_type > 1:

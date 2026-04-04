@@ -2,7 +2,7 @@
 
 CC_BABYAI_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CC_BABYAI_VENV_ACTIVATE="/home/v/vinjain/scratch/.virtualenvs/skyrl/bin/activate"
-CC_BABYAI_MODULES=(cuda/12.6 cudnn gcc arrow/18.1.0 httpproxy)
+CC_BABYAI_MODULES=(cuda/12.6 cudnn gcc httpproxy)
 
 cc_babyai_is_truthy() {
   case "${1,,}" in
@@ -89,9 +89,10 @@ cc_babyai_prepare_layout() {
   : "${CKPT_PATH:="$RUN_DIR/ckpts"}"
   : "${LOG_PATH:="$RUN_DIR/logs"}"
   : "${EXPORT_PATH:="$RUN_DIR/exports"}"
+  : "${RAY_TMP_ROOT:=/tmp}"
   HF_HOME="$EXPERIMENT_ROOT/hf_home"
   WANDB_DIR="$RUN_DIR/wandb"
-  RAY_TMPDIR="$RUN_DIR/ray"
+  : "${RAY_TMPDIR:="$RAY_TMP_ROOT/ray_${SLURM_JOB_ID:-$$}_${RUN_NAME_TIMESTAMP}"}"
   HF_HUB_CACHE="$HF_HOME/hub"
   TRANSFORMERS_CACHE="$HF_HUB_CACHE"
   : "${TOKENIZERS_PARALLELISM:=false}"
@@ -151,8 +152,8 @@ PY
 
 cc_babyai_ensure_dataset() {
   : "${REGENERATE_DATASET:=false}"
-  : "${DATASET_TRAIN_SIZE:=10000}"
-  : "${DATASET_VAL_SIZE:=500}"
+  : "${DATASET_TRAIN_SIZE:=12800}"
+  : "${DATASET_VAL_SIZE:=256}"
 
   if [[ -f "$DATA_DIR/train.parquet" && -f "$DATA_DIR/validation.parquet" ]] && ! cc_babyai_is_truthy "$REGENERATE_DATASET"; then
     return 0
@@ -181,7 +182,7 @@ cc_babyai_build_common_overrides() {
   local -a env_kwargs_overrides=()
 
   : "${NUM_GPUS:=4}"
-  : "${LOGGER:=console}"
+  : "${LOGGER:="[wandb,console]"}"
   : "${PROJECT_NAME:=babyai}"
   : "${INFERENCE_BACKEND:=vllm}"
   : "${SEED:=42}"
@@ -276,6 +277,7 @@ Experiment root: $EXPERIMENT_ROOT
 Dataset dir:     $DATA_DIR
 Run dir:         $RUN_DIR
 Checkpoint dir:  $CKPT_PATH
+Ray temp dir:    $RAY_TMPDIR
 Run name:        $RUN_NAME
 Logger:          $LOGGER
 EOF

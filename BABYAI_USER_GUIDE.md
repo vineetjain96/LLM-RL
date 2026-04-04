@@ -127,6 +127,23 @@ You usually do not need to touch these for BabyAI experiments:
 - `generator.step_wise_trajectories`
   This should stay `false` for GRPO and `true` for `state_action_td`.
 
+## Episode end cases
+
+These edge cases are easy to reason about incorrectly when you start changing `MAX_TURNS`, `MAX_INPUT_LENGTH`, and the non-stop filtering flags.
+
+Important note:
+
+- Success reward is efficiency-shaped, not always exactly `1.0`.
+- With `MAX_TURNS=8`, success at step 6 gives reward `0.625`, not `1.0`.
+
+| Case | GRPO (`step_wise_trajectories=false`) | `state_action_td` (`step_wise_trajectories=true`) |
+|---|---|---|
+| Task solved at step 6/8 and final response ends normally | Episode ends immediately. Reward is the positive success reward for that final step. `stop_reason` is usually `"stop"`. Whole trajectory is kept. | Steps 1-6 are emitted. Step 6 is the last step, gets the positive success reward, and is treated as terminal for TD targets. |
+| Task solved at step 6/8 but final response was truncated and still happened to contain a winning action | Environment may still mark success, but with `zero_reward_on_non_stop=true` the trajectory reward is zeroed because `stop_reason != "stop"`. In the current GRPO launcher, the trajectory is still kept because `apply_overlong_filtering=false`. | The winning step is still emitted, but in the current actor-critic launcher its reward is zeroed and its loss mask is zeroed because `zero_reward_on_non_stop=true` and `apply_overlong_filtering=true`. Earlier valid steps remain. |
+| Conversation exceeds `MAX_INPUT_LENGTH` before the next turn starts, e.g. before step 6 | The generator stops before producing step 6. No further env step happens. The partial trajectory up through step 5 is returned with `stop_reason="length"`. In the current GRPO launcher, reward is zeroed but the trajectory is still trained on. | The generator stops before producing step 6, so only steps 1-5 are emitted. There is no dummy step 6. Step 5 becomes the last emitted step and is treated as terminal from the learner's point of view. |
+
+For `state_action_td`, that last row is the subtle one: hitting `MAX_INPUT_LENGTH` does not create a masked-out final step. It simply cuts the trajectory at the last completed step.
+
 ## Dataset alignment
 
 Dataset alignment matters more than most people expect.

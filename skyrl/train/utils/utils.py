@@ -413,8 +413,10 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
             cfg.generator.batched
         ), "if we are using the offline vLLM engine, we need to put generator in batched mode for faster generation"
 
+    logger_backends = [cfg.trainer.logger] if isinstance(cfg.trainer.logger, str) else cfg.trainer.logger
+
     # TODO(tgriggs): use a more modular config validation
-    if cfg.trainer.logger == "wandb":
+    if "wandb" in logger_backends:
         assert os.environ.get("WANDB_API_KEY"), "`WANDB_API_KEY` is required for `wandb` logger"
 
     if ie_cfg.override_existing_update_group == "auto":

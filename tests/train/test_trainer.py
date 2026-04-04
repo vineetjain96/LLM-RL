@@ -2,6 +2,7 @@
 uv  run --isolated --extra dev pytest tests/train/test_trainer.py
 """
 
+import os
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -200,6 +201,57 @@ def test_micro_batches_accumulated_initialized():
     )
     assert hasattr(critic_worker, "_micro_batches_accumulated")
     assert critic_worker._micro_batches_accumulated == 0
+
+
+def test_pad_batch_pads_to_mini_batch_multiple(dummy_config):
+    dummy_config.trainer.train_batch_size = 8
+    dummy_config.trainer.policy_mini_batch_size = 8
+    dummy_config.trainer.critic_mini_batch_size = 8
+    dummy_config.generator.n_samples_per_prompt = 1
+    dummy_config.generator.step_wise_trajectories = True
+    dummy_config.trainer.critic.model.path = "dummy"
+    dummy_config.trainer.algorithm.advantage_estimator = "state_action_td"
+
+    trainer = RayPPOTrainer(
+        cfg=dummy_config,
+        tracker=None,
+        tokenizer=None,
+        train_dataset=DummyDataset(),
+        eval_dataset=DummyDataset(),
+        inference_engine_client=None,
+        generator=MagicMock(),
+    )
+    trainer.dispatch = MagicMock()
+    trainer.dispatch.get_lcm_dp_size.return_value = 2
+
+    training_input = TrainingInputBatch(
+        {
+            "sequences": torch.tensor([[1, 2], [3, 4], [5, 6]], dtype=torch.long),
+            "attention_mask": torch.ones(3, 2, dtype=torch.long),
+            "response_mask": torch.ones(3, 2, dtype=torch.long),
+            "rewards": torch.ones(3, 2, dtype=torch.float32),
+            "loss_mask": torch.ones(3, 2, dtype=torch.float32),
+            "is_last_step": torch.tensor([True, False, True], dtype=torch.bool),
+        }
+    )
+    training_input.metadata = {
+        "uids": ["a", "b", "c"],
+        "trajectory_ids": ["ta", "tb", "tc"],
+        "step_metadata": [
+            {"parsed_action": "turn left", "valid_action": True, "success": False, "steps": 1},
+            {"parsed_action": "move forward", "valid_action": True, "success": False, "steps": 2},
+            {"parsed_action": "done", "valid_action": True, "success": True, "steps": 3},
+        ],
+    }
+
+    padded = trainer.pad_batch(training_input)
+
+    assert len(padded["sequences"]) == 8
+    assert padded.metadata["pad_size"] == 5
+    assert torch.equal(padded["loss_mask"][3:], torch.zeros(5, 2, dtype=torch.float32))
+    assert torch.equal(padded["is_last_step"][3:], torch.ones(5, dtype=torch.bool))
+    assert padded.metadata["uids"][-5:] == ["pad0", "pad1", "pad2", "pad3", "pad4"]
+    assert padded.metadata["trajectory_ids"][-5:] == ["pad0", "pad1", "pad2", "pad3", "pad4"]
 
 
 def test_validate_batch_sizes():
@@ -637,3 +689,22 @@ def test_validate_cfg_state_action_td_sets_sequence_level_defaults(dummy_config)
 
     assert cfg.trainer.algorithm.policy_loss_type == "gspo"
     assert cfg.trainer.algorithm.loss_reduction == "sequence_mean"
+
+
+def test_validate_cfg_requires_wandb_api_key_for_logger_list(dummy_config):
+    cfg = dummy_config
+    cfg.trainer.logger = ["wandb", "console"]
+
+    with patch.dict(os.environ, {}, clear=True):
+        with patch("skyrl.train.utils.utils.validate_batch_sizes"):
+            with pytest.raises(AssertionError, match="WANDB_API_KEY"):
+                validate_cfg(cfg)
+
+
+def test_validate_cfg_accepts_wandb_in_logger_list_with_api_key(dummy_config):
+    cfg = dummy_config
+    cfg.trainer.logger = ["wandb", "console"]
+
+    with patch.dict(os.environ, {"WANDB_API_KEY": "dummy-key"}, clear=True):
+        with patch("skyrl.train.utils.utils.validate_batch_sizes"):
+            validate_cfg(cfg)

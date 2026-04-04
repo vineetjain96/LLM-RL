@@ -22,7 +22,10 @@ from skyrl.train.generators.utils import (
     prepare_generator_input,
 )
 from skyrl.train.utils import Timer
-from skyrl.train.utils.logging_utils import log_example
+from skyrl.train.utils.logging_utils import (
+    decode_example_from_generator_output,
+    log_example,
+)
 from skyrl.train.utils.trainer_utils import (
     calculate_per_dataset_metrics,
     dump_per_dataset_eval_results,
@@ -79,12 +82,16 @@ async def evaluate(
 
     # Extract data_sources from env_extras
     concat_data_sources = [env_extra.get("data_source") for env_extra in concat_env_extras]
-    vis = tokenizer.decode(generator_output["response_ids"][0])
+    example_prompt, example_response, example_reward = decode_example_from_generator_output(
+        tokenizer,
+        concat_generator_outputs,
+        step_wise=False,
+    )
     log_example(
         logger,
-        prompt=generator_input["prompts"][0],
-        response=vis,
-        reward=generator_output["rewards"][0],
+        prompt=example_prompt,
+        response=example_response,
+        reward=example_reward,
     )
 
     # 2. Group data by data source and calculate per-dataset metrics
@@ -187,8 +194,17 @@ async def evaluate_step_wise(
 
     # Extract data_sources from env_extras
     concat_data_sources = [env_extra.get("data_source") for env_extra in concat_env_extras]
-    vis = tokenizer.decode(generator_output["response_ids"][0])
-    logger.info(f"Eval output example: {vis}")
+    example_prompt, example_response, example_reward = decode_example_from_generator_output(
+        tokenizer,
+        concat_generator_outputs,
+        step_wise=True,
+    )
+    log_example(
+        logger,
+        prompt=example_prompt,
+        response=example_response,
+        reward=example_reward,
+    )
 
     # Only use the final step metrics
     generator_output_last_step = defaultdict(list)

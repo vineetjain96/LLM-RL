@@ -33,9 +33,62 @@ def _color_block_format_and_kwargs(
     return fmt, kwargs
 
 
+def _trajectory_key(trajectory_id: Any) -> Any:
+    if hasattr(trajectory_id, "instance_id") and hasattr(trajectory_id, "repetition_id"):
+        return (trajectory_id.instance_id, trajectory_id.repetition_id)
+    return trajectory_id
+
+
+def decode_example_from_generator_output(
+    tokenizer: Any,
+    generator_output: Dict[str, Any],
+    step_wise: bool = False,
+) -> tuple[str, str, Optional[Union[float, List[float]]]]:
+    """Decode one human-readable example from generator output.
+
+    For step-wise training, generator output is flattened into one sample per step.
+    This helper reconstructs the full transcript for the first trajectory so the
+    logged example reflects the actual multi-turn interaction.
+    """
+    prompt_token_ids = generator_output["prompt_token_ids"]
+    response_ids = generator_output["response_ids"]
+    rewards = generator_output["rewards"]
+
+    if not prompt_token_ids or not response_ids:
+        return "", "", None
+
+    if not step_wise:
+        return tokenizer.decode(prompt_token_ids[0]), tokenizer.decode(response_ids[0]), rewards[0]
+
+    trajectory_ids = generator_output.get("trajectory_ids")
+    if not trajectory_ids:
+        return tokenizer.decode(prompt_token_ids[0]), tokenizer.decode(response_ids[0]), rewards[0]
+
+    first_key = _trajectory_key(trajectory_ids[0])
+    selected_indices = [i for i, trajectory_id in enumerate(trajectory_ids) if _trajectory_key(trajectory_id) == first_key]
+
+    prompt = tokenizer.decode(prompt_token_ids[selected_indices[0]])
+    full_response_ids: List[int] = []
+    selected_rewards = []
+    for index in selected_indices:
+        full_response_ids.extend(response_ids[index])
+        selected_rewards.append(rewards[index])
+
+    if selected_rewards and isinstance(selected_rewards[0], list):
+        reward: Optional[Union[float, List[float]]] = [
+            token_reward for step_rewards in selected_rewards for token_reward in step_rewards
+        ]
+    elif selected_rewards:
+        reward = float(sum(float(step_reward) for step_reward in selected_rewards))
+    else:
+        reward = None
+
+    return prompt, tokenizer.decode(full_response_ids), reward
+
+
 def log_example(
     logger: Any,
-    prompt: List[Dict[str, Any]],
+    prompt: Any,
     response: str,
     reward: Optional[Union[float, List[float]]] = None,
 ) -> None:

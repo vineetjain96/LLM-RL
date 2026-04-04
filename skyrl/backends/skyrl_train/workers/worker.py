@@ -1036,6 +1036,7 @@ class CriticWorkerBase(Worker):
         self.record_memory: bool = False
         self.mesh_rank: MeshRank = None
         self.critic_loss_fn: Callable = ppo_critic_loss
+        self._micro_batches_accumulated = 0
 
     @property
     def uses_state_action_td(self) -> bool:
