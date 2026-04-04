@@ -1665,3 +1665,138 @@ async def test_step_wise_trajectories_basic_output_validation(mock_make, mock_to
     assert generator_output["step_metadata"][0]["valid_action"] is True
     assert generator_output["step_metadata"][1]["parsed_action"] == "done"
     assert generator_output["step_metadata"][1]["success"] is True
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_step_wise_rollout_metrics_are_trajectory_level(mock_make, mock_tokenizer, mock_llm, mock_env_cfg):
+    """Step-wise rollout metrics should reflect full trajectories, not individual turns."""
+    from skyrl.train.generators.base import TrajectoryID
+
+    mock_env_cfg.env_class = "babyai_text"
+    mock_tokenizer.eos_token_id = 4
+
+    def apply_chat_template_side_effect(messages, **kwargs):
+        if kwargs.get("tokenize", True):
+            return [201, 202]
+        return "".join([m.get("content", "") for m in messages])
+
+    mock_tokenizer.apply_chat_template.side_effect = apply_chat_template_side_effect
+
+    async def llm_generate_side_effect(input_batch):
+        num = len(input_batch["prompt_token_ids"]) if "prompt_token_ids" in input_batch else len(input_batch["prompts"])
+        return {
+            "responses": ["step"] * num,
+            "stop_reasons": ["stop"] * num,
+            "response_logprobs": None,
+            "response_ids": [[10, 11, 12, mock_tokenizer.eos_token_id] for _ in range(num)],
+        }
+
+    mock_llm.generate = AsyncMock(side_effect=llm_generate_side_effect)
+
+    class MultiStepEnv(BaseTextEnv):
+        def __init__(self):
+            super().__init__()
+            self.turns = 0
+
+        def init(self, prompt):
+            return prompt, {}
+
+        def step(self, action):
+            self.turns += 1
+            if self.turns == 1:
+                return BaseTextEnvStepOutput(
+                    observations=[{"role": "user", "content": "obs1"}],
+                    reward=0.5,
+                    done=False,
+                    metadata={"parsed_action": "turn left", "valid_action": True, "success": False, "steps": 1},
+                )
+            return BaseTextEnvStepOutput(
+                observations=[],
+                reward=1.0,
+                done=True,
+                metadata={"parsed_action": "done", "valid_action": True, "success": True, "steps": 2},
+            )
+
+        def get_metrics(self):
+            return {"steps": self.turns, "success": True}
+
+    mock_make.side_effect = lambda *args, **kwargs: MultiStepEnv()
+
+    cfg = GeneratorConfig()
+    cfg.sampling_params.max_generate_length = 50
+    cfg.sampling_params.logprobs = None
+    cfg.apply_overlong_filtering = False
+    cfg.max_input_length = 512
+    cfg.batched = False
+    cfg.max_turns = 10
+    cfg.zero_reward_on_non_stop = False
+    cfg.use_conversation_multi_turn = True
+    cfg.step_wise_trajectories = True
+    cfg.chat_template = ChatTemplateConfig(source="name", name_or_path=None)
+
+    generator = SkyRLGymGenerator(
+        generator_cfg=cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+    )
+    generator.base_conversation_token_ids = []
+
+    input_batch: GeneratorInput = {
+        "prompts": [[{"role": "user", "content": "Q?"}]],
+        "env_extras": [{"test": "value"}],
+        "env_classes": [mock_env_cfg.env_class],
+        "trajectory_ids": [TrajectoryID(instance_id="uid1", repetition_id=0)],
+    }
+
+    generator_output: GeneratorOutput = await generator.generate(input_batch)
+    rollout_metrics = generator_output["rollout_metrics"]
+
+    assert rollout_metrics["generate/min_num_tokens"] == 10
+    assert rollout_metrics["generate/max_num_tokens"] == 10
+    assert rollout_metrics["generate/avg_num_tokens"] == pytest.approx(10.0)
+    assert rollout_metrics["environment/avg_steps"] == pytest.approx(2.0)
+    assert rollout_metrics["environment/success_rate"] == pytest.approx(1.0)
+
+
+def test_concatenate_step_wise_generator_outputs_uses_trajectory_lengths():
+    """Step-wise concatenation should keep rollout token metrics trajectory-normalized."""
+    from skyrl.train.generators.base import TrajectoryID
+
+    tid_a = TrajectoryID(instance_id="a", repetition_id=0)
+    tid_b = TrajectoryID(instance_id="b", repetition_id=0)
+    tid_c = TrajectoryID(instance_id="c", repetition_id=0)
+
+    generator_output_1: GeneratorOutput = {
+        "prompt_token_ids": [[1], [2], [3]],
+        "response_ids": [[10, 11], [12, 13, 14], [20]],
+        "rewards": [[0.0, 0.0], [0.0, 1.0, 0.0], [0.5]],
+        "loss_masks": [[1, 1], [1, 1, 1], [1]],
+        "stop_reasons": ["stop", "stop", "stop"],
+        "rollout_metrics": None,
+        "rollout_logprobs": None,
+        "trajectory_ids": [tid_a, tid_a, tid_b],
+        "is_last_step": [False, True, True],
+        "step_metadata": [{}, {}, {}],
+    }
+    generator_output_2: GeneratorOutput = {
+        "prompt_token_ids": [[4], [5]],
+        "response_ids": [[30, 31], [32]],
+        "rewards": [[0.0, 0.0], [0.7]],
+        "loss_masks": [[1, 1], [1]],
+        "stop_reasons": ["stop", "stop"],
+        "rollout_metrics": None,
+        "rollout_logprobs": None,
+        "trajectory_ids": [tid_c, tid_c],
+        "is_last_step": [False, True],
+        "step_metadata": [{}, {}],
+    }
+
+    concatenated_output = concatenate_generator_outputs([generator_output_1, generator_output_2])
+    rollout_metrics = concatenated_output["rollout_metrics"]
+
+    assert rollout_metrics["generate/min_num_tokens"] == 1
+    assert rollout_metrics["generate/max_num_tokens"] == 5
+    assert rollout_metrics["generate/avg_num_tokens"] == pytest.approx(3.0)
+    assert rollout_metrics["generate/std_num_tokens"] == pytest.approx(np.std([5, 1, 3]).item())

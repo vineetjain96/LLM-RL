@@ -1,10 +1,10 @@
 #!/bin/bash
 #SBATCH --job-name=🚀🚀
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task=16
-#SBATCH --gres=gpu:h200:8
+#SBATCH --cpus-per-task=8
+#SBATCH --gres=gpu:h100:4
 #SBATCH --time=24:00:00
-#SBATCH --mem=512G
+#SBATCH --mem=256G
 #SBATCH --account=aip-siamakx
 #SBATCH --output=logs/actor_critic/%A_%a.out
 #SBATCH --error=logs/actor_critic/%A_%a.err
@@ -23,9 +23,14 @@ set -x
 #   ENV_NAME=BabyAI-GoToObj-v0 ENV_KWARGS_JSON='{"room_size": 8}' bash scripts/cc/run_babyai_actor_critic_sync.sh
 #   VALIDATE_ONLY=true bash scripts/cc/run_babyai_actor_critic_sync.sh
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+  cd "$SLURM_SUBMIT_DIR"
+else
+  cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+fi
+
 # shellcheck source=/dev/null
-source "$SCRIPT_DIR/_babyai_common.sh"
+source "$PWD/scripts/cc/_babyai_common.sh"
 
 : "${ALGO_NAME:=state_action_td}"
 # : "${MODEL_NAME:=Qwen/Qwen2.5-1.5B-Instruct}"
@@ -35,7 +40,7 @@ source "$SCRIPT_DIR/_babyai_common.sh"
 : "${MAX_TURNS:=8}"
 : "${EXPERIMENT_ROOT:="$HOME/scratch/babyai"}"
 
-: "${NUM_GPUS:=8}"
+: "${NUM_GPUS:=4}"
 : "${LOGGER:="[wandb,console]"}"
 : "${PROJECT_NAME:=babyai}"
 : "${INFERENCE_BACKEND:=vllm}"
@@ -46,12 +51,12 @@ source "$SCRIPT_DIR/_babyai_common.sh"
 : "${EVAL_BEFORE_TRAIN:=true}"
 : "${EVAL_INTERVAL:=5}"
 : "${UPDATE_EPOCHS_PER_BATCH:=1}"
-: "${TRAIN_BATCH_SIZE:=256}"
-: "${POLICY_MINI_BATCH_SIZE:=256}"
+: "${TRAIN_BATCH_SIZE:=128}"
+: "${POLICY_MINI_BATCH_SIZE:=128}"
 : "${CRITIC_MINI_BATCH_SIZE:=$POLICY_MINI_BATCH_SIZE}"
-: "${MICRO_FORWARD_BATCH_SIZE:=16}"
-: "${MICRO_TRAIN_BATCH_SIZE:=8}"
-: "${CKPT_INTERVAL:=1}"
+: "${MICRO_FORWARD_BATCH_SIZE:=4}"
+: "${MICRO_TRAIN_BATCH_SIZE:=2}"
+: "${CKPT_INTERVAL:=5}"
 : "${MAX_CKPTS_TO_KEEP:=3}"
 
 : "${MAX_PROMPT_LENGTH:=1024}"
@@ -60,7 +65,7 @@ source "$SCRIPT_DIR/_babyai_common.sh"
 : "${N_SAMPLES_PER_PROMPT:=1}"
 
 : "${LR:=1.0e-6}"
-: "${CRITIC_LR:=5.0e-6}"
+: "${CRITIC_LR:=3.0e-6}"
 : "${WEIGHT_DECAY:=1.0e-2}"
 : "${MAX_GRAD_NORM:=1.0}"
 : "${USE_KL_LOSS:=false}"

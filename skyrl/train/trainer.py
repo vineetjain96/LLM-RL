@@ -56,6 +56,7 @@ from skyrl.train.generators.base import (
 from skyrl.train.generators.utils import (
     get_metrics_from_generator_output,
     prepare_generator_input,
+    summarize_step_wise_trajectories,
 )
 from skyrl.train.utils import (
     Timer,
@@ -796,9 +797,22 @@ class RayPPOTrainer:
                 trajectory_id.to_string() for trajectory_id in generator_output["trajectory_ids"]
             ]
             training_input.metadata["step_metadata"] = list(generator_output.get("step_metadata", []) or [])
-        training_input.metadata["avg_response_length"] = sum(
-            len(sample_response_ids) for sample_response_ids in response_ids
-        ) / len(response_ids)
+        if self.cfg.generator.step_wise_trajectories:
+            step_wise_summary = summarize_step_wise_trajectories(
+                responses=response_ids,
+                rewards=rewards,
+                trajectory_ids=generator_output["trajectory_ids"],
+                is_last_step=generator_output["is_last_step"],
+            )
+            training_input.metadata["avg_response_length"] = (
+                float(np.mean(step_wise_summary.response_lengths))
+                if step_wise_summary.response_lengths
+                else 0.0
+            )
+        else:
+            training_input.metadata["avg_response_length"] = sum(
+                len(sample_response_ids) for sample_response_ids in response_ids
+            ) / len(response_ids)
 
         logger.info(f"Number of sequences before padding: {len(training_input['sequences'])}")
         training_input = self.pad_batch(training_input)

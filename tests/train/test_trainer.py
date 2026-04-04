@@ -254,6 +254,61 @@ def test_pad_batch_pads_to_mini_batch_multiple(dummy_config):
     assert padded.metadata["trajectory_ids"][-5:] == ["pad0", "pad1", "pad2", "pad3", "pad4"]
 
 
+@patch("skyrl.train.trainer.convert_prompts_responses_to_batch_tensors")
+def test_convert_to_training_input_step_wise_avg_response_length_is_trajectory_level(
+    mock_convert_to_batch_tensors, dummy_config, dummy_generator
+):
+    from skyrl.train.generators.base import TrajectoryID
+
+    dummy_config.generator.step_wise_trajectories = True
+    dummy_config.generator.n_samples_per_prompt = 1
+    dummy_config.trainer.train_batch_size = 3
+    dummy_config.trainer.policy_mini_batch_size = 3
+    dummy_config.trainer.critic.model.path = None
+
+    mock_convert_to_batch_tensors.return_value = (
+        torch.tensor([[1, 2, 10, 11], [3, 4, 12, 0], [5, 6, 13, 14]], dtype=torch.long),
+        torch.ones(3, 4, dtype=torch.long),
+        torch.tensor([[1, 1, 0], [1, 0, 0], [1, 1, 1]], dtype=torch.long),
+        torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 0.5]], dtype=torch.float32),
+        torch.tensor([[1, 1, 0], [1, 0, 0], [1, 1, 1]], dtype=torch.float32),
+        None,
+        None,
+    )
+
+    trainer = RayPPOTrainer(
+        cfg=dummy_config,
+        tracker=None,
+        tokenizer=MagicMock(pad_token_id=0),
+        train_dataset=DummyDataset(),
+        eval_dataset=DummyDataset(),
+        inference_engine_client=None,
+        generator=dummy_generator,
+    )
+    trainer.dispatch = MagicMock()
+    trainer.dispatch.get_lcm_dp_size.return_value = 1
+
+    generator_output = {
+        "prompt_token_ids": [[1, 2], [3, 4], [5, 6]],
+        "response_ids": [[10, 11], [12], [13, 14, 15]],
+        "rewards": [[0.0, 0.0], [1.0], [0.0, 0.0, 0.5]],
+        "loss_masks": [[1, 1], [1], [1, 1, 1]],
+        "rollout_logprobs": None,
+        "rollout_expert_indices": None,
+        "trajectory_ids": [
+            TrajectoryID(instance_id="traj-a", repetition_id=0),
+            TrajectoryID(instance_id="traj-a", repetition_id=0),
+            TrajectoryID(instance_id="traj-b", repetition_id=0),
+        ],
+        "is_last_step": [False, True, True],
+        "step_metadata": [{}, {}, {}],
+    }
+
+    training_input = trainer.convert_to_training_input(generator_output, ["traj-a", "traj-a", "traj-b"])
+
+    assert training_input.metadata["avg_response_length"] == approx(3.0)
+
+
 def test_validate_batch_sizes():
     """Test the validate_batch_sizes function with various configurations to trigger all error cases."""
 

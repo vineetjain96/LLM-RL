@@ -1,6 +1,7 @@
 import copy
 import os
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -18,6 +19,103 @@ from skyrl.train.generators.base import (
     TrajectoryID,
 )
 from skyrl_gym.metrics import aggregate_for_environment
+
+
+@dataclass
+class StepWiseTrajectorySummary:
+    response_lengths: List[int]
+    rewards: List[float]
+    step_counts: List[int]
+    env_metrics: Optional[List[Dict[str, Any]]] = None
+    env_classes: Optional[List[str]] = None
+
+
+def _trajectory_key(trajectory_id: Any) -> Any:
+    if hasattr(trajectory_id, "instance_id") and hasattr(trajectory_id, "repetition_id"):
+        return (trajectory_id.instance_id, trajectory_id.repetition_id)
+    return trajectory_id
+
+
+def _reward_total(reward: Union[float, List[float]]) -> float:
+    if isinstance(reward, list):
+        return float(np.sum(reward))
+    return float(reward)
+
+
+def summarize_step_wise_trajectories(
+    responses: List[List[int]],
+    rewards: Union[List[float], List[List[float]]],
+    trajectory_ids: List[Any],
+    is_last_step: List[bool],
+    env_metrics: Optional[List[Dict[str, Any]]] = None,
+    env_classes: Optional[List[str]] = None,
+) -> StepWiseTrajectorySummary:
+    """Collapse contiguous step-wise samples into trajectory-level summaries."""
+    num_steps = len(responses)
+    assert len(rewards) == num_steps, f"Expected {num_steps} rewards, got {len(rewards)}"
+    assert len(trajectory_ids) == num_steps, f"Expected {num_steps} trajectory_ids, got {len(trajectory_ids)}"
+    assert len(is_last_step) == num_steps, f"Expected {num_steps} is_last_step values, got {len(is_last_step)}"
+    if env_metrics is not None or env_classes is not None:
+        assert env_metrics is not None and env_classes is not None, (
+            "env_metrics and env_classes must either both be provided or both be None"
+        )
+        assert len(env_metrics) == num_steps, f"Expected {num_steps} env_metrics, got {len(env_metrics)}"
+        assert len(env_classes) == num_steps, f"Expected {num_steps} env_classes, got {len(env_classes)}"
+
+    trajectory_response_lengths: List[int] = []
+    trajectory_rewards: List[float] = []
+    trajectory_step_counts: List[int] = []
+    trajectory_env_metrics: Optional[List[Dict[str, Any]]] = [] if env_metrics is not None else None
+    trajectory_env_classes: Optional[List[str]] = [] if env_classes is not None else None
+
+    current_trajectory = None
+    current_response_length = 0
+    current_reward = 0.0
+    current_step_count = 0
+    current_env_class: Optional[str] = None
+
+    for idx, (response, reward, trajectory_id, last_step) in enumerate(
+        zip(responses, rewards, trajectory_ids, is_last_step)
+    ):
+        trajectory_key = _trajectory_key(trajectory_id)
+        if current_trajectory is None:
+            current_trajectory = trajectory_key
+            if env_classes is not None:
+                current_env_class = env_classes[idx]
+        else:
+            assert trajectory_key == current_trajectory, (
+                "Step-wise rollout metrics require contiguous trajectory ordering. "
+                f"Expected trajectory {current_trajectory}, got {trajectory_key} at index {idx}."
+            )
+
+        current_response_length += len(response)
+        current_reward += _reward_total(reward)
+        current_step_count += 1
+
+        if last_step:
+            trajectory_response_lengths.append(current_response_length)
+            trajectory_rewards.append(current_reward)
+            trajectory_step_counts.append(current_step_count)
+            if trajectory_env_metrics is not None:
+                trajectory_env_metrics.append(env_metrics[idx])
+            if trajectory_env_classes is not None:
+                trajectory_env_classes.append(current_env_class if current_env_class is not None else env_classes[idx])
+
+            current_trajectory = None
+            current_response_length = 0
+            current_reward = 0.0
+            current_step_count = 0
+            current_env_class = None
+
+    assert current_trajectory is None, "Final step-wise trajectory did not terminate with is_last_step=True"
+
+    return StepWiseTrajectorySummary(
+        response_lengths=trajectory_response_lengths,
+        rewards=trajectory_rewards,
+        step_counts=trajectory_step_counts,
+        env_metrics=trajectory_env_metrics,
+        env_classes=trajectory_env_classes,
+    )
 
 
 def _validate_template_file_path(file_path: str) -> str:
@@ -265,7 +363,12 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
         result[key] = sum([generator_output[key] for generator_output in generator_outputs], [])
 
     # Re-aggregate rollout metrics
-    rollout_metrics = get_rollout_metrics(result["response_ids"], result["rewards"])
+    rollout_metrics = get_rollout_metrics(
+        result["response_ids"],
+        result["rewards"],
+        trajectory_ids=result.get("trajectory_ids"),
+        is_last_step=result.get("is_last_step"),
+    )
     result["rollout_metrics"] = rollout_metrics
 
     # Validate the generator output using the number of prompts
@@ -308,6 +411,8 @@ def get_rollout_metrics(
     rewards: Union[List[float], List[List[float]]],
     env_metrics: Optional[List[Dict[str, Any]]] = None,
     env_classes: Optional[List[str]] = None,
+    trajectory_ids: Optional[List[Any]] = None,
+    is_last_step: Optional[List[bool]] = None,
 ):
     """
     Computes rollout metrics including token statistics and optional environment-specific metrics.
@@ -317,19 +422,38 @@ def get_rollout_metrics(
         rewards: List of rewards (either per-trajectory or per-token)
         env_metrics: Optional list of environment-specific metrics for each trajectory
         env_classes: Optional list of environment class names for each trajectory
+        trajectory_ids: Optional parent trajectory identifiers for step-wise outputs
+        is_last_step: Optional final-step flags for step-wise outputs
 
     Returns:
         Dictionary of aggregated metrics
     """
-    num_tokens_arr = np.array([len(response) for response in responses])
-    # Support both response-level and token-level rewards
-    flat_rewards = []
-    for r in rewards:
-        if isinstance(r, list):
-            flat_rewards.append(float(np.sum(r)))
-        else:
-            flat_rewards.append(float(r))
-    flat_rewards_arr = np.array(flat_rewards)
+    if trajectory_ids is not None or is_last_step is not None:
+        assert trajectory_ids is not None and is_last_step is not None, (
+            "trajectory_ids and is_last_step must either both be provided or both be None"
+        )
+        summary = summarize_step_wise_trajectories(
+            responses=responses,
+            rewards=rewards,
+            trajectory_ids=trajectory_ids,
+            is_last_step=is_last_step,
+            env_metrics=env_metrics,
+            env_classes=env_classes,
+        )
+        num_tokens_arr = np.array(summary.response_lengths)
+        flat_rewards_arr = np.array(summary.rewards)
+        env_metrics = summary.env_metrics
+        env_classes = summary.env_classes
+    else:
+        num_tokens_arr = np.array([len(response) for response in responses])
+        # Support both response-level and token-level rewards
+        flat_rewards = []
+        for r in rewards:
+            if isinstance(r, list):
+                flat_rewards.append(float(np.sum(r)))
+            else:
+                flat_rewards.append(float(r))
+        flat_rewards_arr = np.array(flat_rewards)
     non_zero_rewards_arr = flat_rewards_arr > 0.0
     zero_rewards_arr = flat_rewards_arr == 0.0
     # average tokens for non zero rewards

@@ -164,6 +164,8 @@ async def evaluate_step_wise(
     concat_all_envs: List[str] = []
     concat_env_extras: List[Dict[str, Any]] = []
     concat_uids: List[str] = []
+    env_metric_weighted_sums: Dict[str, float] = defaultdict(float)
+    total_eval_trajectories = 0
     sampling_params = cfg.generator.eval_sampling_params
     pbar = tqdm(total=len(eval_dataloader), initial=0, desc="Evaluation Progress")
     for _, prompts in enumerate(eval_dataloader):
@@ -189,6 +191,12 @@ async def evaluate_step_wise(
             concat_env_extras.append(traj_id_to_input[traj_id.instance_id]["env_extras"])
             concat_uids.append(traj_id.instance_id)
         validate_generator_output(generator_input, generator_output, step_wise=True)
+        if generator_output["rollout_metrics"] is not None:
+            num_trajectories = sum(generator_output["is_last_step"])
+            total_eval_trajectories += num_trajectories
+            for key, value in generator_output["rollout_metrics"].items():
+                if key.startswith("environment/"):
+                    env_metric_weighted_sums[key] += value * num_trajectories
         generator_outputs.append(generator_output)
     concat_generator_outputs: GeneratorOutput = concatenate_generator_outputs(generator_outputs)
 
@@ -235,6 +243,11 @@ async def evaluate_step_wise(
             "eval/all/mean_positive_reward": overall_metrics["mean_positive_reward"],
         }
     )
+    for key, value in concat_generator_outputs["rollout_metrics"].items():
+        eval_metrics[f"eval/all/{key}"] = value
+    if total_eval_trajectories > 0:
+        for key, weighted_sum in env_metric_weighted_sums.items():
+            eval_metrics[f"eval/all/{key}"] = weighted_sum / total_eval_trajectories
 
     # 4. Prepare dumping data
     # TODO[Ben] update this to be cloud-compatible

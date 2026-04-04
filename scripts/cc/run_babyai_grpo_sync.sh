@@ -1,10 +1,10 @@
 #!/bin/bash
 #SBATCH --job-name=🚀
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task=16
-#SBATCH --gres=gpu:h200:8
+#SBATCH --cpus-per-task=8
+#SBATCH --gres=gpu:h100:4
 #SBATCH --time=24:00:00
-#SBATCH --mem=512G
+#SBATCH --mem=256G
 #SBATCH --account=aip-siamakx
 #SBATCH --output=logs/grpo/%A_%a.out
 #SBATCH --error=logs/grpo/%A_%a.err
@@ -23,9 +23,14 @@ set -x
 #   ENV_NAME=BabyAI-GoToObj-v0 ENV_KWARGS_JSON='{"room_size": 8}' bash scripts/cc/run_babyai_grpo_sync.sh
 #   VALIDATE_ONLY=true bash scripts/cc/run_babyai_grpo_sync.sh
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+  cd "$SLURM_SUBMIT_DIR"
+else
+  cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+fi
+
 # shellcheck source=/dev/null
-source "$SCRIPT_DIR/_babyai_common.sh"
+source "$PWD/scripts/cc/_babyai_common.sh"
 
 : "${ALGO_NAME:=grpo_sync}"
 # : "${MODEL_NAME:=Qwen/Qwen2.5-1.5B-Instruct}"
@@ -35,7 +40,7 @@ source "$SCRIPT_DIR/_babyai_common.sh"
 : "${MAX_TURNS:=8}"
 : "${EXPERIMENT_ROOT:="$HOME/scratch/babyai"}"
 
-: "${NUM_GPUS:=8}"
+: "${NUM_GPUS:=4}"
 : "${LOGGER:="[wandb,console]"}"
 : "${PROJECT_NAME:=babyai}"
 : "${INFERENCE_BACKEND:=vllm}"
@@ -49,8 +54,8 @@ source "$SCRIPT_DIR/_babyai_common.sh"
 : "${TRAIN_BATCH_SIZE:=256}"
 : "${POLICY_MINI_BATCH_SIZE:=256}"
 : "${MICRO_FORWARD_BATCH_SIZE:=16}"
-: "${MICRO_TRAIN_BATCH_SIZE:=8}"
-: "${CKPT_INTERVAL:=1}"
+: "${MICRO_TRAIN_BATCH_SIZE:=4}"
+: "${CKPT_INTERVAL:=10}"
 : "${MAX_CKPTS_TO_KEEP:=3}"
 
 : "${MAX_PROMPT_LENGTH:=1024}"

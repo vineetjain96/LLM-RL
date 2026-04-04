@@ -830,7 +830,14 @@ class SkyRLGymGenerator(GeneratorInterface):
         else:
             rollout_expert_indices = None
 
-        rollout_metrics = get_rollout_metrics(responses, rewards, env_metrics, env_classes)
+        rollout_metrics = get_rollout_metrics(
+            responses,
+            rewards,
+            env_metrics,
+            env_classes,
+            trajectory_ids=out_trajectory_ids,
+            is_last_step=is_last_step,
+        )
 
         if self.generator_cfg.zero_reward_on_non_stop:
             # set reward to 0 if the stop reason is not "stop"
