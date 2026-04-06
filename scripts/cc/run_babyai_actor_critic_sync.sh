@@ -58,10 +58,10 @@ source "$REPO_ROOT/scripts/cc/_babyai_common.sh"
 : "${CRITIC_MINI_BATCH_SIZE:=$POLICY_MINI_BATCH_SIZE}"
 : "${POLICY_UPDATES_PER_BATCH:=1}"
 : "${CRITIC_UPDATES_PER_BATCH:=2}"
-: "${ACTOR_ADVANTAGE_TYPE:=gae}"
+: "${ACTOR_ADVANTAGE_TYPE:=td_delta}"
 : "${MICRO_FORWARD_BATCH_SIZE:=4}"
 : "${MICRO_TRAIN_BATCH_SIZE:=2}"
-: "${CKPT_INTERVAL:=5}"
+: "${CKPT_INTERVAL:=10}"
 : "${MAX_CKPTS_TO_KEEP:=3}"
 
 : "${MAX_PROMPT_LENGTH:=1024}"
@@ -95,8 +95,8 @@ cc_babyai_build_common_overrides common_overrides
 
 algo_overrides=(
   "trainer.algorithm.advantage_estimator=state_action_td"
-  "trainer.algorithm.policy_loss_type=regular"
-  "trainer.algorithm.loss_reduction=token_mean"
+  "trainer.algorithm.policy_loss_type=gspo"
+  "trainer.algorithm.loss_reduction=sequence_mean"
   "trainer.critic.model.path=$MODEL_NAME"
   "trainer.critic.optimizer_config.lr=$CRITIC_LR"
   "trainer.critic.optimizer_config.weight_decay=$WEIGHT_DECAY"

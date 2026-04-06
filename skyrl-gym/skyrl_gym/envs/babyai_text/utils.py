@@ -69,14 +69,6 @@ def parse_action(action_text: str) -> Optional[int]:
             extracted_action = match.group(1).strip().lower()
             break
 
-    # If no tag found, try to find action in the text directly
-    if extracted_action is None:
-        # Check if any known action appears in the text
-        for action_name in ACTION_MAP:
-            if action_name in action_text:
-                extracted_action = action_name
-                break
-
     if extracted_action is None:
         return None
 

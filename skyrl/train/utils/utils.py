@@ -270,6 +270,13 @@ def validate_cfg(cfg: SkyRLTrainConfig):
             cfg.generator.use_conversation_multi_turn
         ), "state_action_td requires generator.use_conversation_multi_turn=true"
         assert cfg.environment.env_class == "babyai_text", "state_action_td is only supported for babyai_text in v1"
+
+        if state_action_cfg.actor_advantage_type == "gae":
+            logger.info(
+                "actor_advantage_type='gae' does not use Q-values for the actor; "
+                f"overriding q_loss_coef from {state_action_cfg.q_loss_coef} to 0.0"
+            )
+            state_action_cfg.q_loss_coef = 0.0
     else:
         assert state_action_cfg.policy_updates_per_batch is None, (
             "trainer.algorithm.state_action.policy_updates_per_batch is only supported with "

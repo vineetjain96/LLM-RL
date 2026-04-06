@@ -33,6 +33,44 @@ from skyrl.train.utils.trainer_utils import (
 )
 
 
+def _add_eval_rollout_metrics(eval_metrics: Dict[str, float], rollout_metrics: Dict[str, Any]) -> None:
+    """Adds rollout metrics to eval outputs, skipping training-only response-length metrics."""
+    for key, value in rollout_metrics.items():
+        if key.startswith("response_lengths/"):
+            continue
+        eval_metrics[f"eval/all/{key}"] = value
+
+
+def _get_last_step_generator_output(concat_generator_outputs: GeneratorOutput) -> GeneratorOutput:
+    """Aligns step-wise generator output to one row per trajectory for eval metrics."""
+    generator_output_last_step = defaultdict(list)
+    is_last_step_mask = concat_generator_outputs["is_last_step"]
+    assert is_last_step_mask is not None, "step-wise eval requires is_last_step"
+
+    num_steps = len(is_last_step_mask)
+    num_trajectories = sum(is_last_step_mask)
+    for key, value in concat_generator_outputs.items():
+        if not isinstance(value, list):
+            continue
+
+        if len(value) == num_steps:
+            generator_output_last_step[key] = [
+                item for item, is_last_step in zip(value, is_last_step_mask) if is_last_step
+            ]
+            continue
+
+        if len(value) == num_trajectories:
+            generator_output_last_step[key] = value
+            continue
+
+        raise AssertionError(
+            f"Length mismatch: expected {num_steps} step rows or {num_trajectories} trajectory rows, "
+            f"got {len(value)} for key {key}"
+        )
+
+    return generator_output_last_step
+
+
 @torch.no_grad()
 async def evaluate(
     eval_dataloader: StatefulDataLoader,
@@ -109,8 +147,7 @@ async def evaluate(
         }
     )
 
-    for key, value in concat_generator_outputs["rollout_metrics"].items():
-        eval_metrics[f"eval/all/{key}"] = value
+    _add_eval_rollout_metrics(eval_metrics, concat_generator_outputs["rollout_metrics"])
 
     # 4. Prepare dumping data
     # TODO[Ben] update this to be cloud-compatible
@@ -214,17 +251,9 @@ async def evaluate_step_wise(
         reward=example_reward,
     )
 
-    # Only use the final step metrics
-    generator_output_last_step = defaultdict(list)
+    # Only use one row per trajectory for eval metrics.
+    generator_output_last_step = _get_last_step_generator_output(concat_generator_outputs)
     is_last_step_mask = concat_generator_outputs["is_last_step"]
-    for key in concat_generator_outputs:
-        if isinstance(concat_generator_outputs[key], list):
-            assert len(concat_generator_outputs[key]) == len(
-                is_last_step_mask
-            ), f"Length mismatch: {len(concat_generator_outputs[key])} != {len(is_last_step_mask)} for key {key}"
-            generator_output_last_step[key] = [
-                val for val, is_last_step in zip(concat_generator_outputs[key], is_last_step_mask) if is_last_step
-            ]
     uids_last_step = [uid for uid, is_last_step in zip(concat_uids, is_last_step_mask) if is_last_step]
     data_sources_last_step = [
         data_source for data_source, is_last_step in zip(concat_data_sources, is_last_step_mask) if is_last_step
@@ -243,8 +272,7 @@ async def evaluate_step_wise(
             "eval/all/mean_positive_reward": overall_metrics["mean_positive_reward"],
         }
     )
-    for key, value in concat_generator_outputs["rollout_metrics"].items():
-        eval_metrics[f"eval/all/{key}"] = value
+    _add_eval_rollout_metrics(eval_metrics, concat_generator_outputs["rollout_metrics"])
     if total_eval_trajectories > 0:
         for key, weighted_sum in env_metric_weighted_sums.items():
             eval_metrics[f"eval/all/{key}"] = weighted_sum / total_eval_trajectories

@@ -7,8 +7,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from skyrl.train.config import EnvironmentConfig, SamplingParams
-from skyrl.train.evaluate import evaluate
-from skyrl.train.generators.base import GeneratorInterface, GeneratorOutput
+from skyrl.train.evaluate import evaluate, evaluate_step_wise
+from skyrl.train.generators.base import GeneratorInterface, GeneratorOutput, TrajectoryID
 from tests.train.util import example_dummy_config
 
 
@@ -78,6 +78,10 @@ async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path):
         "rewards": [1.0, 0.0],
         "loss_masks": [[1], [1]],
         "stop_reasons": ["stop", "stop"],
+        "rollout_metrics": {
+            "generate/avg_num_tokens": 1.0,
+            "response_lengths/avg_num_model_tokens": 1.0,
+        },
         "rollout_logprobs": None,
     }
     generator = DummyGenerator(generator_output)
@@ -105,9 +109,97 @@ async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path):
     for key, expected_value in expected_metrics.items():
         assert metrics[key] == pytest.approx(expected_value)
 
+    assert metrics["eval/all/generate/avg_num_tokens"] == pytest.approx(1.0)
+    assert "eval/all/response_lengths/avg_num_model_tokens" not in metrics
+
     assert len(generator.seen_inputs) == 1
     seen_batch = generator.seen_inputs[0]
     assert seen_batch["prompts"] == [prompt["prompt"] for prompt in prompts_batch]
     assert seen_batch["env_classes"] == ["gsm8k", "custom_env"]
     assert seen_batch["env_extras"] == [prompt["env_extras"] for prompt in prompts_batch]
     assert seen_batch["batch_metadata"].training_phase == "eval"
+
+
+@pytest.mark.asyncio
+async def test_evaluate_step_wise_ignores_trajectory_level_response_lengths(dummy_config, tmp_path):
+    cfg = dummy_config
+    cfg.generator.inference_engine.backend = "vllm"
+    cfg.generator.eval_sampling_params = SamplingParams(
+        max_generate_length=20,
+        temperature=0.0,
+        top_p=1.0,
+        top_k=-1,
+        min_p=0.0,
+        logprobs=None,
+        stop=None,
+    )
+    cfg.generator.eval_n_samples_per_prompt = 1
+    cfg.generator.step_wise_trajectories = True
+    cfg.environment = EnvironmentConfig(env_class="babyai_text")
+    cfg.trainer.dump_eval_results = False
+    cfg.trainer.export_path = str(tmp_path)
+
+    prompts_batch = [
+        {
+            "prompt": [{"role": "user", "content": "question-1"}],
+            "env_class": None,
+            "env_extras": {"data_source": "dataset/a"},
+            "uid": "uid-1",
+        },
+        {
+            "prompt": [{"role": "user", "content": "question-2"}],
+            "env_class": None,
+            "env_extras": {"data_source": "dataset/b"},
+            "uid": "uid-2",
+        },
+    ]
+    eval_dataloader = DummyStatefulDataLoader([prompts_batch])
+
+    generator_output: GeneratorOutput = {
+        "prompt_token_ids": [[101], [102], [103], [104]],
+        "response_ids": [[201], [202, 203], [204, 205, 206], [207, 208, 209, 210]],
+        "rewards": [0.0, 1.0, 0.0, 0.0],
+        "loss_masks": [[1], [1, 1], [1, 1, 1], [1, 1, 1, 1]],
+        "stop_reasons": ["stop", "stop", "stop", "stop"],
+        "rollout_metrics": {
+            "generate/avg_num_tokens": 5.0,
+            "response_lengths/avg_num_model_tokens": 5.0,
+        },
+        "rollout_logprobs": None,
+        "trajectory_ids": [
+            TrajectoryID(instance_id="uid-1", repetition_id=0),
+            TrajectoryID(instance_id="uid-1", repetition_id=0),
+            TrajectoryID(instance_id="uid-2", repetition_id=0),
+            TrajectoryID(instance_id="uid-2", repetition_id=0),
+        ],
+        "is_last_step": [False, True, False, True],
+        "step_metadata": [{}, {}, {}, {}],
+        "step_model_token_counts": [[1, 2], [3, 4]],
+    }
+    generator = DummyGenerator(generator_output)
+
+    tokenizer = MagicMock()
+    tokenizer.decode.side_effect = lambda tokens: "decoded"
+
+    metrics = await evaluate_step_wise(
+        eval_dataloader=eval_dataloader,
+        generator=generator,
+        cfg=cfg,
+        global_step=5,
+        tokenizer=tokenizer,
+    )
+
+    expected_metrics = {
+        "eval/dataset_a/avg_score": 1.0,
+        "eval/dataset_a/pass_at_1": 1.0,
+        "eval/dataset_b/avg_score": 0.0,
+        "eval/dataset_b/pass_at_1": 0.0,
+        "eval/all/avg_score": 0.5,
+        "eval/all/pass_at_1": 0.5,
+    }
+
+    for key, expected_value in expected_metrics.items():
+        assert metrics[key] == pytest.approx(expected_value)
+
+    assert metrics["eval/all/generate/avg_num_tokens"] == pytest.approx(5.0)
+    assert "eval/all/response_lengths/avg_num_model_tokens" not in metrics
