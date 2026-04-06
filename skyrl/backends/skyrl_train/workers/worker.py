@@ -1124,18 +1124,19 @@ class CriticWorkerBase(Worker):
             loss_mask = experience.loss_mask
             state_index = experience.state_index
             action_end_index = experience.action_end_index
-            next_state_index = experience.next_state_index
             q_targets = experience.q_targets
             v_targets = experience.v_targets
             valid_mask = (loss_mask.sum(dim=-1) > 0).float()
 
             with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
-                critic_outputs = self.model(
-                    sequences,
+                critic_inputs = dict(
+                    input_ids=sequences,
                     attention_mask=attention_mask,
                     state_index=state_index,
                     action_end_index=action_end_index,
-                    next_state_index=next_state_index,
+                )
+                critic_outputs = self.model(
+                    **critic_inputs,
                 )
                 q_values = critic_outputs["q_values"]
                 v_values = critic_outputs["v_values"]
@@ -1256,15 +1257,17 @@ class CriticWorkerBase(Worker):
         if self.uses_state_action_td:
             state_index = micro_batch["state_index"]
             action_end_index = micro_batch["action_end_index"]
-            next_state_index = micro_batch["next_state_index"]
             with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
-                critic_outputs = self.model(
-                    sequences,
+                critic_inputs = dict(
+                    input_ids=sequences,
                     attention_mask=attention_mask,
                     state_index=state_index,
                     action_end_index=action_end_index,
-                    next_state_index=next_state_index,
                 )
+                next_state_index = micro_batch.get("next_state_index")
+                if next_state_index is not None:
+                    critic_inputs["next_state_index"] = next_state_index
+                critic_outputs = self.model(**critic_inputs)
             critic_outputs = {key: value.to("cpu") for key, value in critic_outputs.items()}
             output = TrainingOutputBatch(critic_outputs)
             output.metadata = micro_batch.metadata

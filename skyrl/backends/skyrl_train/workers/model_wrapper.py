@@ -550,17 +550,18 @@ def _get_critic_model(
                 )
 
             if state_index is not None or action_end_index is not None or next_state_index is not None:
-                assert state_index is not None and action_end_index is not None and next_state_index is not None
+                assert state_index is not None and action_end_index is not None
                 batch_indices = torch.arange(hidden_states_for_gather.size(0), device=hidden_states_for_gather.device)
                 state_repr = hidden_states_for_gather[batch_indices, state_index.long()]
                 action_repr = hidden_states_for_gather[batch_indices, action_end_index.long()]
-                next_state_repr = hidden_states_for_gather[batch_indices, next_state_index.long()]
 
                 critic_outputs = {
                     "v_values": getattr(self, self.value_head_prefix)(state_repr).squeeze(-1),
                     "q_values": getattr(self, self.q_head_prefix)(action_repr).squeeze(-1),
-                    "next_v_values": getattr(self, self.value_head_prefix)(next_state_repr).squeeze(-1),
                 }
+                if next_state_index is not None:
+                    next_state_repr = hidden_states_for_gather[batch_indices, next_state_index.long()]
+                    critic_outputs["next_v_values"] = getattr(self, self.value_head_prefix)(next_state_repr).squeeze(-1)
                 if return_output:
                     return critic_outputs, outputs
                 return critic_outputs

@@ -305,6 +305,7 @@ class StateActionConfig(BaseConfig):
     critic_loss_type: str = "smooth_l1"
     critic_head_bias: bool = False
     actor_advantage_type: str = "q_minus_v"
+    analyze_next_v_mismatch: bool = False
     policy_updates_per_batch: Optional[int] = None
     critic_updates_per_batch: Optional[int] = None
 

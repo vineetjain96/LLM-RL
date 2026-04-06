@@ -271,9 +271,9 @@ def validate_cfg(cfg: SkyRLTrainConfig):
         ), "state_action_td requires generator.use_conversation_multi_turn=true"
         assert cfg.environment.env_class == "babyai_text", "state_action_td is only supported for babyai_text in v1"
 
-        if state_action_cfg.actor_advantage_type == "gae":
+        if state_action_cfg.actor_advantage_type != "q_minus_v" and state_action_cfg.q_loss_coef != 0.0:
             logger.info(
-                "actor_advantage_type='gae' does not use Q-values for the actor; "
+                f"actor_advantage_type='{state_action_cfg.actor_advantage_type}' does not use Q-values; "
                 f"overriding q_loss_coef from {state_action_cfg.q_loss_coef} to 0.0"
             )
             state_action_cfg.q_loss_coef = 0.0

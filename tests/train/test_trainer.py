@@ -702,14 +702,14 @@ def test_state_action_td_advantages_and_targets(dummy_config, dummy_generator):
 
     data["q_values"] = torch.tensor([0.6, 1.2], dtype=torch.float32)
     data["v_values"] = torch.tensor([0.2, 0.8], dtype=torch.float32)
-    data["next_v_values"] = torch.tensor([0.5, 0.3], dtype=torch.float32)
 
     data = trainer.compute_advantages_and_returns(data)
 
+    assert torch.allclose(data["next_v_values"], torch.tensor([0.8, 0.0]))
     expected_advantages = torch.tensor([[0.4, 0.4, 0.0], [0.0, 0.4, 0.0]], dtype=torch.float32)
-    expected_returns = torch.tensor([[0.594, 0.594, 0.0], [0.0, 1.0, 0.0]], dtype=torch.float32)
-    expected_q_targets = torch.tensor([0.45, 1.0], dtype=torch.float32)
-    expected_v_targets = torch.tensor([0.594, 1.0], dtype=torch.float32)
+    expected_returns = torch.tensor([[0.864, 0.864, 0.0], [0.0, 1.0, 0.0]], dtype=torch.float32)
+    expected_q_targets = torch.tensor([0.72, 1.0], dtype=torch.float32)
+    expected_v_targets = torch.tensor([0.864, 1.0], dtype=torch.float32)
 
     assert torch.allclose(data["advantages"], expected_advantages, atol=1e-6)
     assert torch.allclose(data["returns"], expected_returns, atol=1e-6)
@@ -719,9 +719,129 @@ def test_state_action_td_advantages_and_targets(dummy_config, dummy_generator):
     metrics = data.metadata["metrics"]
     assert metrics["avg_final_rewards"] == approx(1.0)
     assert metrics["avg_advantages"] == approx(0.4)
-    assert metrics["avg_q_targets"] == approx(0.725)
-    assert metrics["avg_v_targets"] == approx(0.797)
+    assert metrics["avg_q_targets"] == approx(0.86)
+    assert metrics["avg_v_targets"] == approx(0.932)
     assert metrics["invalid_action_rate"] == approx(0.5)
+
+
+def test_state_action_td_indices_track_per_sample_response_lengths(dummy_config, dummy_generator):
+    cfg = dummy_config
+    cfg.trainer.algorithm.advantage_estimator = "state_action_td"
+    cfg.trainer.algorithm.use_kl_loss = False
+    cfg.trainer.algorithm.use_kl_in_reward = False
+    cfg.trainer.critic.model.path = "dummy-critic"
+    cfg.trainer.strategy = "fsdp2"
+    cfg.generator.step_wise_trajectories = True
+    cfg.generator.use_conversation_multi_turn = True
+    cfg.generator.max_turns = 2
+    cfg.environment.env_class = "babyai_text"
+
+    trainer = RayPPOTrainer(
+        cfg=cfg,
+        tracker=None,
+        tokenizer=None,
+        train_dataset=DummyDataset(),
+        eval_dataset=DummyDataset(),
+        inference_engine_client=None,
+        generator=dummy_generator,
+    )
+
+    data = TrainingInputBatch(
+        {
+            "sequences": torch.tensor(
+                [
+                    [0, 10, 11, 12, 21, 22, 23],
+                    [30, 31, 32, 33, 34, 41, 42],
+                ],
+                dtype=torch.long,
+            ),
+            "response_mask": torch.tensor([[1, 1, 1], [0, 1, 1]], dtype=torch.long),
+            "loss_mask": torch.tensor([[1, 1, 0], [0, 1, 0]], dtype=torch.long),
+            "rewards": torch.tensor([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]], dtype=torch.float32),
+            "is_last_step": torch.tensor([False, True], dtype=torch.bool),
+        }
+    )
+    data.metadata = {
+        "uids": ["traj-0", "traj-1"],
+        "trajectory_ids": ["traj-0", "traj-1"],
+        "avg_response_length": 2.5,
+        "step_metadata": [
+            {"parsed_action": "turn left", "valid_action": True, "success": False, "steps": 1},
+            {"parsed_action": "move forward", "valid_action": True, "success": False, "steps": 1},
+        ],
+    }
+
+    data = trainer._annotate_state_action_step_fields(data)
+
+    assert data["state_index"].tolist() == [3, 4]
+    assert data["action_end_index"].tolist() == [5, 5]
+    assert data["next_state_index"].tolist() == [6, 6]
+
+
+def test_state_action_td_forward_uses_shifted_prompt_next_v(dummy_config, dummy_generator):
+    cfg = dummy_config
+    cfg.trainer.algorithm.advantage_estimator = "state_action_td"
+    cfg.trainer.algorithm.use_kl_loss = False
+    cfg.trainer.algorithm.use_kl_in_reward = False
+    cfg.trainer.algorithm.state_action.analyze_next_v_mismatch = False
+    cfg.trainer.critic.model.path = "dummy-critic"
+    cfg.trainer.strategy = "fsdp2"
+    cfg.generator.step_wise_trajectories = True
+    cfg.generator.use_conversation_multi_turn = True
+    cfg.generator.max_turns = 2
+    cfg.environment.env_class = "babyai_text"
+
+    trainer = RayPPOTrainer(
+        cfg=cfg,
+        tracker=None,
+        tokenizer=None,
+        train_dataset=DummyDataset(),
+        eval_dataset=DummyDataset(),
+        inference_engine_client=None,
+        generator=dummy_generator,
+    )
+    trainer.ref_model = None
+    trainer.dispatch = MagicMock()
+
+    trainer.dispatch.forward.side_effect = [
+        {
+            "q_values": torch.tensor([0.6, 1.2], dtype=torch.float32),
+            "v_values": torch.tensor([0.2, 0.8], dtype=torch.float32),
+        },
+        {
+            "output": torch.tensor([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]], dtype=torch.float32),
+        },
+    ]
+
+    data = TrainingInputBatch(
+        {
+            "sequences": torch.tensor([[11, 12, 21, 22, 23], [11, 12, 31, 32, 33]], dtype=torch.long),
+            "attention_mask": torch.ones((2, 5), dtype=torch.long),
+            "response_mask": torch.tensor([[1, 1, 1], [1, 1, 1]], dtype=torch.long),
+            "loss_mask": torch.tensor([[1, 1, 0], [0, 1, 0]], dtype=torch.long),
+            "rewards": torch.tensor([[0.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=torch.float32),
+            "is_last_step": torch.tensor([False, True], dtype=torch.bool),
+        }
+    )
+    data.metadata = {
+        "uids": ["traj-0", "traj-0"],
+        "trajectory_ids": ["traj-0", "traj-0"],
+        "response_length": 3,
+        "avg_response_length": 3.0,
+        "step_metadata": [
+            {"parsed_action": "turn left", "valid_action": True, "success": False, "steps": 1},
+            {"parsed_action": "done", "valid_action": True, "success": True, "steps": 2},
+        ],
+    }
+
+    data = trainer._annotate_state_action_step_fields(data)
+    data = trainer.fwd_logprobs_values_reward(data)
+
+    critic_call = trainer.dispatch.forward.call_args_list[0]
+    critic_batch = critic_call.args[1]
+    assert "next_state_index" not in critic_batch
+    assert torch.allclose(data["next_v_values"], torch.tensor([0.8, 0.0]))
+    assert data.get("bootstrap_next_v_values") is None
 
 
 @pytest.mark.parametrize(
@@ -787,6 +907,69 @@ def test_state_action_td_actor_advantage_types(
     data = trainer.compute_advantages_and_returns(data)
 
     assert torch.allclose(data["advantages"], expected_advantages, atol=1e-6)
+
+
+def test_state_action_td_next_v_mismatch_analysis_metrics(dummy_config, dummy_generator):
+    cfg = dummy_config
+    cfg.trainer.algorithm.advantage_estimator = "state_action_td"
+    cfg.trainer.algorithm.use_kl_loss = False
+    cfg.trainer.algorithm.use_kl_in_reward = False
+    cfg.trainer.algorithm.advantage_batch_normalize = False
+    cfg.trainer.algorithm.gamma = 0.9
+    cfg.trainer.algorithm.lambd = 0.8
+    cfg.trainer.algorithm.state_action.analyze_next_v_mismatch = True
+    cfg.trainer.critic.model.path = "dummy-critic"
+    cfg.trainer.strategy = "fsdp2"
+    cfg.generator.step_wise_trajectories = True
+    cfg.generator.use_conversation_multi_turn = True
+    cfg.generator.max_turns = 2
+    cfg.environment.env_class = "babyai_text"
+
+    trainer = RayPPOTrainer(
+        cfg=cfg,
+        tracker=None,
+        tokenizer=None,
+        train_dataset=DummyDataset(),
+        eval_dataset=DummyDataset(),
+        inference_engine_client=None,
+        generator=dummy_generator,
+    )
+
+    data = TrainingInputBatch(
+        {
+            "sequences": torch.tensor([[11, 12, 21, 22, 23], [11, 12, 31, 32, 33]], dtype=torch.long),
+            "response_mask": torch.tensor([[1, 1, 1], [1, 1, 1]], dtype=torch.long),
+            "loss_mask": torch.tensor([[1, 1, 0], [0, 1, 0]], dtype=torch.long),
+            "rewards": torch.tensor([[0.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=torch.float32),
+            "is_last_step": torch.tensor([False, True], dtype=torch.bool),
+        }
+    )
+    data.metadata = {
+        "uids": ["traj-0", "traj-0"],
+        "trajectory_ids": ["traj-0", "traj-0"],
+        "avg_response_length": 3.0,
+        "step_metadata": [
+            {"parsed_action": "turn left", "valid_action": True, "success": False, "steps": 1},
+            {"parsed_action": "done", "valid_action": True, "success": True, "steps": 2},
+        ],
+    }
+
+    data = trainer._annotate_state_action_step_fields(data)
+    data["q_values"] = torch.tensor([0.6, 1.2], dtype=torch.float32)
+    data["v_values"] = torch.tensor([0.2, 0.8], dtype=torch.float32)
+    data["bootstrap_next_v_values"] = torch.tensor([0.5, 0.0], dtype=torch.float32)
+
+    data = trainer.compute_advantages_and_returns(data)
+
+    metrics = data.metadata["metrics"]
+    assert metrics["state_action_next_v_mismatch_count"] == approx(1.0)
+    assert metrics["state_action_next_v_mismatch_mae"] == approx(0.3)
+    assert metrics["state_action_next_v_mismatch_rmse"] == approx(0.3)
+    assert metrics["state_action_q_target_mismatch_mae"] == approx(0.27)
+    assert metrics["state_action_td_delta_sign_flip_rate"] == approx(0.0)
+
+    assert trainer.all_metrics["analysis/state_action_next_v_mismatch_count"] == approx(1.0)
+    assert trainer.all_metrics["analysis/state_action_next_v_mismatch_mae"] == approx(0.3)
 
 
 def test_validate_cfg_state_action_td_preserves_policy_loss_config(dummy_config):

@@ -203,13 +203,24 @@ class RayPPOTrainer:
             training_input.metadata["step_metadata"] = step_metadata
 
         response_len = training_input["response_mask"].shape[1]
-        prompt_width = training_input["sequences"].shape[1] - response_len
+        total_seq_len = training_input["sequences"].shape[1]
+        prompt_width = total_seq_len - response_len
         loss_mask = training_input["loss_mask"]
         response_mask = training_input["response_mask"]
+        response_lengths = response_mask.sum(dim=-1).long()
+        has_response = response_lengths > 0
 
-        state_index = torch.full((training_input.batch_size,), prompt_width - 1, dtype=torch.long)
+        state_index = torch.where(
+            has_response,
+            total_seq_len - response_lengths - 1,
+            torch.zeros_like(response_lengths),
+        )
         action_end_index = prompt_width + self._last_nonzero_index(loss_mask > 0)
-        next_state_index = prompt_width + response_mask.sum(dim=-1).clamp(min=1).long() - 1
+        next_state_index = torch.where(
+            has_response,
+            torch.full_like(response_lengths, total_seq_len - 1),
+            torch.zeros_like(response_lengths),
+        )
         step_reward = training_input["rewards"].sum(dim=-1)
         done = (
             training_input["is_last_step"].to(dtype=torch.float32)
@@ -243,6 +254,35 @@ class RayPPOTrainer:
         return training_input
 
     @torch.no_grad()
+    def _compute_state_action_shifted_next_v_values(
+        self, v_values: torch.Tensor, data: TrainingInputBatch
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Align V(s_{t+1}) with the next step's prompt-state representation."""
+        assert self.uses_state_action_td, "shifted next-step values are only defined for state_action_td"
+
+        trajectory_ids = data.metadata.get("trajectory_ids")
+        assert trajectory_ids is not None, "state_action_td requires trajectory_ids metadata"
+
+        valid_step_mask = data["loss_mask"].sum(dim=-1) > 0
+        done = data.get("done")
+        next_v_values = torch.zeros_like(v_values)
+        compare_mask = torch.zeros_like(valid_step_mask, dtype=torch.bool)
+
+        grouped_indices: Dict[str, List[int]] = defaultdict(list)
+        for idx, trajectory_id in enumerate(trajectory_ids):
+            if valid_step_mask[idx]:
+                grouped_indices[trajectory_id].append(idx)
+
+        for indices in grouped_indices.values():
+            for idx, next_idx in zip(indices[:-1], indices[1:]):
+                if done is not None and bool(done[idx].item()):
+                    continue
+                next_v_values[idx] = v_values[next_idx]
+                compare_mask[idx] = True
+
+        return next_v_values, compare_mask
+
+    @torch.no_grad()
     def _compute_state_action_td_advantages_and_targets(
         self, data: TrainingInputBatch
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -250,7 +290,11 @@ class RayPPOTrainer:
         lambd = self.cfg.trainer.algorithm.lambd
         q_values = data["q_values"].detach()
         v_values = data["v_values"].detach()
-        next_v_values = data["next_v_values"].detach()
+        next_v_values = data.get("next_v_values")
+        if next_v_values is None:
+            next_v_values, _ = self._compute_state_action_shifted_next_v_values(v_values, data)
+            data["next_v_values"] = next_v_values
+        next_v_values = next_v_values.detach()
         step_reward = data["step_reward"]
         done = data["done"]
         q_targets = step_reward + gamma * next_v_values * (1.0 - done)
@@ -298,6 +342,57 @@ class RayPPOTrainer:
         advantages = actor_advantages.unsqueeze(-1) * data["loss_mask"]
         returns = v_targets.unsqueeze(-1) * data["loss_mask"]
         return advantages, returns, q_targets, v_targets
+
+    @torch.no_grad()
+    def _collect_state_action_next_v_mismatch_metrics(self, data: TrainingInputBatch) -> Dict[str, float]:
+        """Measure how much the current-step bootstrap differs from the next step's prompt-state value."""
+        if not self.uses_state_action_td:
+            return {}
+        if not self.cfg.trainer.algorithm.state_action.analyze_next_v_mismatch:
+            return {}
+
+        v_values = data.get("v_values")
+        predicted_next_v_values = data.get("bootstrap_next_v_values")
+        if predicted_next_v_values is None:
+            predicted_next_v_values = data.get("next_v_values")
+        step_reward = data.get("step_reward")
+        if v_values is None or predicted_next_v_values is None or step_reward is None:
+            return {}
+
+        actual_next_step_v, compare_mask = self._compute_state_action_shifted_next_v_values(v_values.detach(), data)
+        if not compare_mask.any():
+            return {}
+
+        predicted_next_v = predicted_next_v_values[compare_mask].detach().float()
+        actual_next_v = actual_next_step_v[compare_mask].float()
+        next_v_delta = predicted_next_v - actual_next_v
+
+        gamma = float(self.cfg.trainer.algorithm.gamma)
+        q_target_delta = gamma * next_v_delta
+
+        step_reward = step_reward[compare_mask].detach().float()
+        current_v = v_values[compare_mask].detach().float()
+        td_delta_pred = step_reward + gamma * predicted_next_v - current_v
+        td_delta_actual = step_reward + gamma * actual_next_v - current_v
+
+        actual_next_v_abs_mean = actual_next_v.abs().mean().clamp(min=1e-8)
+
+        return {
+            "analysis/state_action_next_v_mismatch_count": float(compare_mask.sum().item()),
+            "analysis/state_action_next_v_mismatch_mae": next_v_delta.abs().mean().item(),
+            "analysis/state_action_next_v_mismatch_rmse": next_v_delta.pow(2).mean().sqrt().item(),
+            "analysis/state_action_next_v_mismatch_max_abs": next_v_delta.abs().max().item(),
+            "analysis/state_action_next_v_mismatch_rel_mae": (
+                next_v_delta.abs().mean() / actual_next_v_abs_mean
+            ).item(),
+            "analysis/state_action_next_v_bootstrap_mean": predicted_next_v.mean().item(),
+            "analysis/state_action_next_v_shifted_prompt_mean": actual_next_v.mean().item(),
+            "analysis/state_action_q_target_mismatch_mae": q_target_delta.abs().mean().item(),
+            "analysis/state_action_q_target_mismatch_rmse": q_target_delta.pow(2).mean().sqrt().item(),
+            "analysis/state_action_td_delta_sign_flip_rate": (
+                torch.sign(td_delta_pred) != torch.sign(td_delta_actual)
+            ).float().mean().item(),
+        }
 
     def _build_train_dataloader_and_compute_training_steps(self):
         """
@@ -1040,6 +1135,16 @@ class RayPPOTrainer:
         avg_response_length = data.metadata["avg_response_length"]
         data = data.to("cpu")
 
+        if self.uses_state_action_td:
+            next_v_mismatch_metrics = self._collect_state_action_next_v_mismatch_metrics(data)
+            if next_v_mismatch_metrics:
+                if "metrics" not in data.metadata:
+                    data.metadata["metrics"] = {}
+                data.metadata["metrics"].update(
+                    {key.removeprefix("analysis/"): value for key, value in next_v_mismatch_metrics.items()}
+                )
+                self.all_metrics.update(next_v_mismatch_metrics)
+
         valid_advantages = torch.masked_select(
             data["advantages"][: num_samples - pad_size, ...],
             (
@@ -1195,18 +1300,18 @@ class RayPPOTrainer:
         if training_input.get("rollout_expert_indices") is not None:
             fwd_keys.append("rollout_expert_indices")
         data_fwd_pass = training_input.select(keys=fwd_keys, metadata_keys=["response_length"])
-        critic_fwd_pass = (
-            training_input.select(
-                keys=["sequences", "attention_mask", "state_index", "action_end_index", "next_state_index"]
-            )
-            if self.uses_state_action_td
-            else data_fwd_pass
-        )
+        critic_fwd_pass = data_fwd_pass
+        if self.uses_state_action_td:
+            critic_fwd_keys = ["sequences", "attention_mask", "state_index", "action_end_index"]
+            if self.cfg.trainer.algorithm.state_action.analyze_next_v_mismatch:
+                critic_fwd_keys.append("next_state_index")
+            critic_fwd_pass = training_input.select(keys=critic_fwd_keys)
 
         values = None
         q_values = None
         v_values = None
         next_v_values = None
+        bootstrap_next_v_values = None
         base_log_probs = None
         action_log_probs = None
 
@@ -1216,7 +1321,7 @@ class RayPPOTrainer:
             if self.uses_state_action_td:
                 q_values = critic_output["q_values"]
                 v_values = critic_output["v_values"]
-                next_v_values = critic_output["next_v_values"]
+                bootstrap_next_v_values = critic_output.get("next_v_values")
             else:
                 values = critic_output["output"]
 
@@ -1240,15 +1345,21 @@ class RayPPOTrainer:
         values = values[: len(sequences_all)] if values is not None else None
         q_values = q_values[: len(sequences_all)] if q_values is not None else None
         v_values = v_values[: len(sequences_all)] if v_values is not None else None
-        next_v_values = next_v_values[: len(sequences_all)] if next_v_values is not None else None
+        bootstrap_next_v_values = (
+            bootstrap_next_v_values[: len(sequences_all)] if bootstrap_next_v_values is not None else None
+        )
 
         training_input["base_action_log_probs"] = base_log_probs
         training_input["action_log_probs"] = action_log_probs
         training_input["values"] = values
         if self.uses_state_action_td:
+            assert v_values is not None, "state_action_td requires critic v_values"
             training_input["q_values"] = q_values
             training_input["v_values"] = v_values
+            next_v_values, _ = self._compute_state_action_shifted_next_v_values(v_values, training_input)
             training_input["next_v_values"] = next_v_values
+            if bootstrap_next_v_values is not None:
+                training_input["bootstrap_next_v_values"] = bootstrap_next_v_values
 
         if training_input.get("rollout_logprobs", None) is not None:
             # calculates the difference in probs between inference and trainer components
