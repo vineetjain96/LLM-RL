@@ -304,6 +304,9 @@ class StateActionConfig(BaseConfig):
     v_loss_coef: float = 1.0
     critic_loss_type: str = "smooth_l1"
     critic_head_bias: bool = False
+    actor_advantage_type: str = "q_minus_v"
+    policy_updates_per_batch: Optional[int] = None
+    critic_updates_per_batch: Optional[int] = None
 
 
 # see https://docs.skyrl.ai/docs/algorithms/off_policy_correction for more details

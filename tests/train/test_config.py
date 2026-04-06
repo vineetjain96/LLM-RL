@@ -153,6 +153,9 @@ def test_state_action_typed_config_overrides():
             "trainer.algorithm.state_action.v_loss_coef=1.3",
             "trainer.algorithm.state_action.critic_loss_type=mse",
             "trainer.algorithm.state_action.critic_head_bias=true",
+            "trainer.algorithm.state_action.actor_advantage_type=gae",
+            "trainer.algorithm.state_action.policy_updates_per_batch=1",
+            "trainer.algorithm.state_action.critic_updates_per_batch=4",
         ]
     )
 
@@ -162,6 +165,9 @@ def test_state_action_typed_config_overrides():
     assert cfg.trainer.algorithm.state_action.v_loss_coef == 1.3
     assert cfg.trainer.algorithm.state_action.critic_loss_type == "mse"
     assert cfg.trainer.algorithm.state_action.critic_head_bias is True
+    assert cfg.trainer.algorithm.state_action.actor_advantage_type == "gae"
+    assert cfg.trainer.algorithm.state_action.policy_updates_per_batch == 1
+    assert cfg.trainer.algorithm.state_action.critic_updates_per_batch == 4
 
 
 def test_legacy_config_translation():

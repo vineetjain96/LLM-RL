@@ -265,6 +265,17 @@ class BabyAITextEnv(BaseTextEnv):
         action_idx = utils.parse_action(action)
 
         if action_idx is None:
+            self._done = self.turns >= self.max_turns
+            self._success = False
+            final_reward = utils.compute_reward(
+                done=self._done,
+                success=False,
+                step_count=self._step_count,
+                max_steps=self.max_turns,
+                reward_on_success=self.reward_on_success,
+                step_penalty=self.step_penalty,
+            )
+
             # Invalid action - provide feedback
             feedback = (
                 "I couldn't understand your action. Please use one of the available actions:\n"
@@ -273,10 +284,10 @@ class BabyAITextEnv(BaseTextEnv):
             )
 
             return BaseTextEnvStepOutput(
-                observations=[{"role": "user", "content": feedback}],
-                reward=0.0,
-                done=False,
-                metadata={"parsed_action": None, "valid_action": False},
+                observations=[] if self._done else [{"role": "user", "content": feedback}],
+                reward=final_reward,
+                done=self._done,
+                metadata={"parsed_action": None, "valid_action": False, "success": False, "steps": self._step_count},
             )
 
         # Execute the action in the underlying environment

@@ -28,3 +28,38 @@ def test_generate_obs_from_image_uses_minigrid_bottom_center_coordinates():
     assert "You see a green key 3 step(s) ahead." in obs_text
     assert "You see a grey wall 1 step(s) to your left." in obs_text
     assert "You see a blue ball 1 step(s) to your right." in obs_text
+
+
+def test_invalid_action_before_turn_cap_returns_feedback():
+    env = BabyAITextEnv(env_config={}, extras={"max_turns": 2})
+
+    result = env.step("invalid action")
+
+    assert result["done"] is False
+    assert result["reward"] == 0.0
+    assert len(result["observations"]) == 1
+    assert "I couldn't understand your action." in result["observations"][0]["content"]
+    assert result["metadata"] == {
+        "parsed_action": None,
+        "valid_action": False,
+        "success": False,
+        "steps": 1,
+    }
+
+
+def test_invalid_action_at_turn_cap_ends_episode():
+    env = BabyAITextEnv(env_config={}, extras={"max_turns": 2})
+    env.turns = 1
+    env._step_count = 1
+
+    result = env.step("invalid action")
+
+    assert result["done"] is True
+    assert result["reward"] == 0.0
+    assert result["observations"] == []
+    assert result["metadata"] == {
+        "parsed_action": None,
+        "valid_action": False,
+        "success": False,
+        "steps": 2,
+    }

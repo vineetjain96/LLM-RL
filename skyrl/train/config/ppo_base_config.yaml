@@ -188,6 +188,9 @@ trainer:
       v_loss_coef: 1.0
       critic_loss_type: "smooth_l1"
       critic_head_bias: false
+      actor_advantage_type: "q_minus_v"
+      policy_updates_per_batch: null
+      critic_updates_per_batch: null
     dynamic_sampling:
       type: null # filter, replace, or null
       max_sample_batches: 30 # sample at most this many batches before stopping, -1 to sample forever

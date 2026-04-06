@@ -6,22 +6,22 @@
 #SBATCH --time=24:00:00
 #SBATCH --mem=256G
 #SBATCH --account=aip-siamakx
-#SBATCH --output=logs/grpo/%A_%a.out
-#SBATCH --error=logs/grpo/%A_%a.err
+#SBATCH --output=logs/gspo/%A_%a.out
+#SBATCH --error=logs/gspo/%A_%a.err
 
 set -euo pipefail
 set -x
 
-# Synchronous BabyAI GRPO launcher for local Compute Canada runs.
+# Synchronous BabyAI GSPO launcher for local Compute Canada runs.
 # It mirrors the current sync FSDP example style, keeps all artifacts under
 # ~/scratch/babyai by default, and is matched as closely as possible to the
 # state_action_td launcher except for algorithm-specific settings.
 #
 # Examples:
-#   bash scripts/cc/run_babyai_grpo_sync.sh
-#   LOGGER=wandb MODEL_NAME=Qwen/Qwen3-4B-Instruct-2507 bash scripts/cc/run_babyai_grpo_sync.sh
-#   ENV_NAME=BabyAI-GoToObj-v0 ENV_KWARGS_JSON='{"room_size": 8}' bash scripts/cc/run_babyai_grpo_sync.sh
-#   VALIDATE_ONLY=true bash scripts/cc/run_babyai_grpo_sync.sh
+#   bash scripts/cc/run_babyai_gspo_sync.sh
+#   LOGGER=wandb MODEL_NAME=Qwen/Qwen3-4B-Instruct-2507 bash scripts/cc/run_babyai_gspo_sync.sh
+#   ENV_NAME=BabyAI-GoToObj-v0 ENV_KWARGS_JSON='{"room_size": 8}' bash scripts/cc/run_babyai_gspo_sync.sh
+#   VALIDATE_ONLY=true bash scripts/cc/run_babyai_gspo_sync.sh
 
 if [[ -n "${SLURM_SUBMIT_DIR:-}" && -f "${SLURM_SUBMIT_DIR}/scripts/cc/_babyai_common.sh" ]]; then
   REPO_ROOT="$SLURM_SUBMIT_DIR"
@@ -34,7 +34,7 @@ cd "$REPO_ROOT"
 # shellcheck source=/dev/null
 source "$REPO_ROOT/scripts/cc/_babyai_common.sh"
 
-: "${ALGO_NAME:=grpo_sync}"
+: "${ALGO_NAME:=gspo_sync}"
 # : "${MODEL_NAME:=Qwen/Qwen2.5-1.5B-Instruct}"
 : "${MODEL_NAME:=Qwen/Qwen3-4B-Instruct-2507}"
 : "${ENV_NAME:=BabyAI-GoToLocal-v0}"
@@ -92,8 +92,8 @@ cc_babyai_build_common_overrides common_overrides
 
 algo_overrides=(
   "trainer.algorithm.advantage_estimator=grpo"
-  "trainer.algorithm.policy_loss_type=regular"
-  "trainer.algorithm.loss_reduction=token_mean"
+  "trainer.algorithm.policy_loss_type=gspo"
+  "trainer.algorithm.loss_reduction=sequence_mean"
   "trainer.algorithm.grpo_norm_by_std=true"
   "trainer.algorithm.eps_clip_low=$GRPO_EPS_CLIP_LOW"
   "trainer.algorithm.eps_clip_high=$GRPO_EPS_CLIP_HIGH"

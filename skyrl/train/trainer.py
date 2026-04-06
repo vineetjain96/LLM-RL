@@ -140,6 +140,47 @@ class RayPPOTrainer:
     def uses_state_action_td(self) -> bool:
         return self.cfg.trainer.algorithm.advantage_estimator == "state_action_td"
 
+    def _get_state_action_updates_per_batch(self, model: str) -> Optional[int]:
+        if not self.uses_state_action_td:
+            return None
+
+        state_action_cfg = self.cfg.trainer.algorithm.state_action
+        if model == "policy":
+            return state_action_cfg.policy_updates_per_batch
+        if model == "critic":
+            return state_action_cfg.critic_updates_per_batch
+        raise ValueError(f"Unknown model '{model}'")
+
+    def _get_optimizer_steps_per_train_batch(self, model: str) -> int:
+        configured_updates = self._get_state_action_updates_per_batch(model)
+        if configured_updates is not None:
+            return configured_updates * self.cfg.trainer.update_epochs_per_batch
+
+        if model == "policy":
+            base_steps = self.cfg.trainer.train_batch_size // self.cfg.trainer.policy_mini_batch_size
+        elif model == "critic":
+            base_steps = self.cfg.trainer.train_batch_size // self.cfg.trainer.critic_mini_batch_size
+        else:
+            raise ValueError(f"Unknown model '{model}'")
+
+        return base_steps * self.cfg.trainer.update_epochs_per_batch
+
+    def _resolve_training_mini_batch_size(self, model: str, data_batch_size: int) -> int:
+        configured_updates = self._get_state_action_updates_per_batch(model)
+        if configured_updates is not None:
+            assert data_batch_size % configured_updates == 0, (
+                f"Expanded training batch size {data_batch_size} must be divisible by "
+                f"trainer.algorithm.state_action.{model}_updates_per_batch={configured_updates}"
+            )
+            return data_batch_size // configured_updates
+
+        n_samples = self.cfg.generator.n_samples_per_prompt
+        if model == "policy":
+            return self.cfg.trainer.policy_mini_batch_size * n_samples
+        if model == "critic":
+            return self.cfg.trainer.critic_mini_batch_size * n_samples
+        raise ValueError(f"Unknown model '{model}'")
+
     @staticmethod
     def _last_nonzero_index(mask: torch.Tensor) -> torch.Tensor:
         mask = mask.to(dtype=torch.long)
@@ -234,7 +275,16 @@ class RayPPOTrainer:
                 value_advantages[idx] = last_gae
                 v_targets[idx] = v_values[idx] + last_gae
 
-        actor_advantages = q_values - v_values
+        actor_advantage_type = self.cfg.trainer.algorithm.state_action.actor_advantage_type
+        if actor_advantage_type == "q_minus_v":
+            actor_advantages = q_values - v_values
+        elif actor_advantage_type == "gae":
+            actor_advantages = value_advantages
+        elif actor_advantage_type == "td_delta":
+            actor_advantages = q_targets - v_values
+        else:
+            raise ValueError(f"Unsupported state_action actor_advantage_type: {actor_advantage_type}")
+
         if self.cfg.trainer.algorithm.advantage_batch_normalize and valid_step_mask.any():
             valid_advantages = actor_advantages[valid_step_mask]
             adv_mean = valid_advantages.mean()
@@ -399,8 +449,6 @@ class RayPPOTrainer:
                             training_input.pop(key)
                         training_input.metadata.pop("uids")
 
-                        if self.cfg.trainer.algorithm.advantage_batch_normalize and not self.uses_state_action_td:
-                            training_input = normalize_advantages_dict(training_input)
                     if self.cfg.trainer.dump_data_batch:
                         # dump data to file
                         with Timer("dump_data_batch"):
@@ -626,14 +674,10 @@ class RayPPOTrainer:
             else:
                 critic_model = None
 
-        policy_steps_per_train_batch = (
-            cfg.trainer.train_batch_size // cfg.trainer.policy_mini_batch_size * cfg.trainer.update_epochs_per_batch
-        )
+        policy_steps_per_train_batch = self._get_optimizer_steps_per_train_batch("policy")
         critic_steps_per_train_batch = 0
         if cfg.trainer.critic.model.path:
-            critic_steps_per_train_batch = (
-                cfg.trainer.train_batch_size // cfg.trainer.critic_mini_batch_size * cfg.trainer.update_epochs_per_batch
-            )
+            critic_steps_per_train_batch = self._get_optimizer_steps_per_train_batch("critic")
         policy_num_training_steps = (
             self.total_training_steps * policy_steps_per_train_batch if self.total_training_steps is not None else None
         )
@@ -1062,14 +1106,27 @@ class RayPPOTrainer:
     def _get_required_batch_multiple(self) -> int:
         """Return the batch-size multiple required by dispatch and optimizer staging."""
         required_multiple = 1
+        lcm_dp_size = None
 
         if self.dispatch is not None:
-            required_multiple = math.lcm(required_multiple, self.dispatch.get_lcm_dp_size())
+            lcm_dp_size = self.dispatch.get_lcm_dp_size()
+            required_multiple = math.lcm(required_multiple, lcm_dp_size)
 
         n_samples = self.cfg.generator.n_samples_per_prompt
-        required_multiple = math.lcm(required_multiple, self.cfg.trainer.policy_mini_batch_size * n_samples)
+        policy_updates = self._get_state_action_updates_per_batch("policy")
+        if policy_updates is None:
+            required_multiple = math.lcm(required_multiple, self.cfg.trainer.policy_mini_batch_size * n_samples)
         if self.has_critic:
-            required_multiple = math.lcm(required_multiple, self.cfg.trainer.critic_mini_batch_size * n_samples)
+            critic_updates = self._get_state_action_updates_per_batch("critic")
+            if critic_updates is None:
+                required_multiple = math.lcm(required_multiple, self.cfg.trainer.critic_mini_batch_size * n_samples)
+
+        if lcm_dp_size is not None:
+            if policy_updates is not None:
+                required_multiple = math.lcm(required_multiple, lcm_dp_size * policy_updates)
+            if self.has_critic:
+                if critic_updates is not None:
+                    required_multiple = math.lcm(required_multiple, lcm_dp_size * critic_updates)
 
         return required_multiple
 
@@ -1317,13 +1374,10 @@ class RayPPOTrainer:
             Dict of reduced metrics from training
         """
         # Compute mini batch size from config (algorithm-level concept)
-        n_samples = self.cfg.generator.n_samples_per_prompt
+        mini_batch_size = self._resolve_training_mini_batch_size(model, len(data))
         if model == "policy":
-            mini_batch_size = self.cfg.trainer.policy_mini_batch_size * n_samples
             # Normalize advantages for policy training; critic training does not need this
             data = self._normalize_advantages(data, mini_batch_size)
-        else:
-            mini_batch_size = self.cfg.trainer.critic_mini_batch_size * n_samples
 
         all_metrics: Dict[str, List[float]] = defaultdict(list)
 

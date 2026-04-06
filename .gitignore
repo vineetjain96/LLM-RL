@@ -131,3 +131,6 @@ tx/tinker/alembic/__pycache__/
 
 # notes I write down
 *.txt
+
+# slurm output files
+*.out

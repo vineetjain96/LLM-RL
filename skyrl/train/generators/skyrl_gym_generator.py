@@ -52,6 +52,7 @@ class TrajectoryOutput:
     env_metrics: Dict[str, Any]
     step_metadata: Optional[Dict[str, Any]] = None
     rollout_expert_indices: Optional[List[List[List[int]]]] = None
+    step_model_token_counts: Optional[List[int]] = None
 
 
 @dataclass
@@ -298,6 +299,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         # Accumulate per-step rewards. Format: (reward, response_end_token_idx)
         per_step_rewards: List[Tuple[float, Optional[int]]] = []
+        step_model_token_counts: List[int] = []
 
         is_step_wise = self.generator_cfg.step_wise_trajectories
 
@@ -396,6 +398,8 @@ class SkyRLGymGenerator(GeneratorInterface):
                 added_eos=added_eos,
                 rollout_expert_indices=rollout_expert_indices,
             )
+            turn_loss_mask = turn_output.get_turn_loss_mask()
+            step_model_token_counts.append(int(sum(turn_loss_mask)))
 
             if turn_output.rollout_expert_indices is not None and agent_loop_state.rollout_expert_indices is None:
                 agent_loop_state.rollout_expert_indices = []
@@ -406,7 +410,6 @@ class SkyRLGymGenerator(GeneratorInterface):
                 turn_prompt_ids = agent_loop_state.input_ids
 
                 # agent loop only tracks loss mask and rollout logprobs for this turn with step_wise training
-                turn_loss_mask = turn_output.get_turn_loss_mask()
                 turn_response_logprobs: Optional[List[float]] = turn_output.get_turn_rollout_logprobs()
 
                 per_step_output = TrajectoryOutput(
@@ -522,6 +525,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                 rollout_logprobs=rollout_logprobs,
                 env_metrics=env_metrics,
                 rollout_expert_indices=rollout_expert_indices_out,
+                step_model_token_counts=step_model_token_counts,
             )
 
         return agent_loop_output
@@ -681,6 +685,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         rewards = []
         loss_masks = []
         env_metrics = []
+        step_model_token_counts = []
         truncated_logprobs: Optional[List[List[float]]] = [] if logprobs is not None else None
         truncated_indices: Optional[List] = [] if raw_rollout_expert_indices is not None else None
 
@@ -694,6 +699,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                 response = response[:max_tokens]
             loss_masks.append([1] * len(response))
             truncated_responses.append(response)
+            step_model_token_counts.append([len(response)])
             if logprobs is not None:
                 sample_logprobs = logprobs[i][: len(response)]
                 truncated_logprobs.append(sample_logprobs)
@@ -707,7 +713,13 @@ class SkyRLGymGenerator(GeneratorInterface):
             # Close the environment
             await self._run_in_executor_if_available(env.close)
 
-        rollout_metrics = get_rollout_metrics(responses, rewards, env_metrics, env_classes)
+        rollout_metrics = get_rollout_metrics(
+            responses,
+            rewards,
+            env_metrics,
+            env_classes,
+            step_model_token_counts=step_model_token_counts,
+        )
 
         if self.generator_cfg.apply_overlong_filtering:
             # set loss mask to 0 if the stop reason is not "stop"
@@ -722,6 +734,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             "rollout_metrics": rollout_metrics,
             "rollout_logprobs": truncated_logprobs,
             "rollout_expert_indices": truncated_indices,
+            "step_model_token_counts": step_model_token_counts,
         }
 
         return generator_output
@@ -784,7 +797,9 @@ class SkyRLGymGenerator(GeneratorInterface):
             out_trajectory_ids = []
             out_env_classes = []
             step_metadata = []
+            step_model_token_counts = []
             for i, output in enumerate(all_outputs):
+                step_model_token_counts.append([int(sum(step_output.loss_mask)) for step_output in output.step_outputs])
                 for j, step_output in enumerate(output.step_outputs):
                     responses.append(step_output.response_ids)
                     rewards.append(step_output.reward)
@@ -807,6 +822,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             is_last_step = None
             out_trajectory_ids = None
             step_metadata = None
+            step_model_token_counts = [output.step_model_token_counts or [] for output in all_outputs]
 
         if sampling_params is not None:
             # sampling params will be a dict in the format of the inference engine backend
@@ -837,6 +853,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             env_classes,
             trajectory_ids=out_trajectory_ids,
             is_last_step=is_last_step,
+            step_model_token_counts=step_model_token_counts,
         )
 
         if self.generator_cfg.zero_reward_on_non_stop:
@@ -859,6 +876,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             "rollout_expert_indices": rollout_expert_indices,
             "is_last_step": is_last_step,
             "step_metadata": step_metadata,
+            "step_model_token_counts": step_model_token_counts,
         }
 
         return generator_output

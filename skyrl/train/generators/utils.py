@@ -368,6 +368,7 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
         result["rewards"],
         trajectory_ids=result.get("trajectory_ids"),
         is_last_step=result.get("is_last_step"),
+        step_model_token_counts=result.get("step_model_token_counts"),
     )
     result["rollout_metrics"] = rollout_metrics
 
@@ -413,6 +414,7 @@ def get_rollout_metrics(
     env_classes: Optional[List[str]] = None,
     trajectory_ids: Optional[List[Any]] = None,
     is_last_step: Optional[List[bool]] = None,
+    step_model_token_counts: Optional[List[List[int]]] = None,
 ):
     """
     Computes rollout metrics including token statistics and optional environment-specific metrics.
@@ -424,6 +426,8 @@ def get_rollout_metrics(
         env_classes: Optional list of environment class names for each trajectory
         trajectory_ids: Optional parent trajectory identifiers for step-wise outputs
         is_last_step: Optional final-step flags for step-wise outputs
+        step_model_token_counts: Optional per-trajectory list of per-step model token counts.
+            Each inner list contains the number of assistant-generated tokens for each step.
 
     Returns:
         Dictionary of aggregated metrics
@@ -471,6 +475,30 @@ def get_rollout_metrics(
         "generate/avg_tokens_non_zero_rewards": avg_tokens_non_zero_rewards.item(),
         "generate/avg_tokens_zero_rewards": avg_tokens_zero_rewards.item(),
     }
+
+    if step_model_token_counts is not None:
+        expected_num_trajectories = int(np.sum(is_last_step)) if is_last_step is not None else len(responses)
+        assert len(step_model_token_counts) == expected_num_trajectories, (
+            "step_model_token_counts must have one entry per trajectory, "
+            f"got {len(step_model_token_counts)} entries for {expected_num_trajectories} trajectories"
+        )
+        flat_step_model_token_counts = [count for counts in step_model_token_counts for count in counts]
+        assert len(flat_step_model_token_counts) > 0, "step_model_token_counts must contain at least one step count"
+
+        trajectory_model_tokens_arr = np.array([sum(counts) for counts in step_model_token_counts])
+        step_model_tokens_arr = np.array(flat_step_model_token_counts)
+        rollout_metrics.update(
+            {
+                "response_lengths/min_num_model_tokens": np.min(trajectory_model_tokens_arr).item(),
+                "response_lengths/max_num_model_tokens": np.max(trajectory_model_tokens_arr).item(),
+                "response_lengths/avg_num_model_tokens": np.mean(trajectory_model_tokens_arr).item(),
+                "response_lengths/std_num_model_tokens": np.std(trajectory_model_tokens_arr).item(),
+                "response_lengths/min_num_model_tokens_per_step": np.min(step_model_tokens_arr).item(),
+                "response_lengths/max_num_model_tokens_per_step": np.max(step_model_tokens_arr).item(),
+                "response_lengths/avg_num_model_tokens_per_step": np.mean(step_model_tokens_arr).item(),
+                "response_lengths/std_num_model_tokens_per_step": np.std(step_model_tokens_arr).item(),
+            }
+        )
 
     if env_metrics is not None and env_classes is not None:
         env_to_metrics = defaultdict(list)

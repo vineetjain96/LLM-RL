@@ -70,10 +70,17 @@ def validate_batch_sizes(cfg: SkyRLTrainConfig):
     5. Per-gpu mini batch size must be divisible by per-gpu micro batch size, otherwise the last micro batch will
        be incomplete.
     """
-    assert cfg.trainer.train_batch_size >= cfg.trainer.policy_mini_batch_size
+    uses_state_action_td = cfg.trainer.algorithm.advantage_estimator == "state_action_td"
+    state_action_cfg = cfg.trainer.algorithm.state_action
+    use_state_action_policy_updates = uses_state_action_td and state_action_cfg.policy_updates_per_batch is not None
+    use_state_action_critic_updates = uses_state_action_td and state_action_cfg.critic_updates_per_batch is not None
+
+    if not use_state_action_policy_updates:
+        assert cfg.trainer.train_batch_size >= cfg.trainer.policy_mini_batch_size
     assert cfg.trainer.policy_mini_batch_size > 0, "policy_mini_batch_size must be greater than 0"
     if cfg.trainer.critic.model.path is not None:
-        assert cfg.trainer.train_batch_size >= cfg.trainer.critic_mini_batch_size
+        if not use_state_action_critic_updates:
+            assert cfg.trainer.train_batch_size >= cfg.trainer.critic_mini_batch_size
         assert cfg.trainer.critic_mini_batch_size > 0, "critic_mini_batch_size must be greater than 0"
     assert cfg.trainer.micro_train_batch_size_per_gpu > 0, "micro_train_batch_size_per_gpu must be greater than 0"
     assert cfg.trainer.micro_forward_batch_size_per_gpu > 0, "micro_forward_batch_size_per_gpu must be greater than 0"
@@ -93,72 +100,74 @@ def validate_batch_sizes(cfg: SkyRLTrainConfig):
     else:
         policy_dp_size = policy_world_size // cfg.trainer.policy.sequence_parallel_size
 
-    assert cfg.trainer.train_batch_size % cfg.trainer.policy_mini_batch_size == 0, (
-        f"train_batch_size {cfg.trainer.train_batch_size} should be divisible by "
-        f"policy_mini_batch_size {cfg.trainer.policy_mini_batch_size}"
-    )
-    policy_mini_batch_size_per_gpu = (
-        cfg.trainer.policy_mini_batch_size * cfg.generator.n_samples_per_prompt // policy_dp_size
-    )
-    assert policy_mini_batch_size_per_gpu > 0, (
-        f"Invalid policy_mini_batch_size_per_gpu: {policy_mini_batch_size_per_gpu}. "
-        f"mini_batch_size={cfg.trainer.policy_mini_batch_size}, "
-        f"n_samples_per_prompt={cfg.generator.n_samples_per_prompt}, "
-        f"dp_size={policy_dp_size}"
-    )
-    assert policy_mini_batch_size_per_gpu % cfg.trainer.micro_train_batch_size_per_gpu == 0, (
-        f"normalized policy_mini_batch_size_per_gpu {policy_mini_batch_size_per_gpu} should be divisible "
-        f"by micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
-    )
-    assert policy_mini_batch_size_per_gpu // cfg.trainer.micro_train_batch_size_per_gpu > 0, (
-        f"normalized policy_mini_batch_size_per_gpu {policy_mini_batch_size_per_gpu} should be larger than "
-        f"micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
-    )
-    policy_train_batch_size_per_gpu = (
-        cfg.trainer.train_batch_size * cfg.generator.n_samples_per_prompt // policy_dp_size
-    )
+    if not use_state_action_policy_updates:
+        assert cfg.trainer.train_batch_size % cfg.trainer.policy_mini_batch_size == 0, (
+            f"train_batch_size {cfg.trainer.train_batch_size} should be divisible by "
+            f"policy_mini_batch_size {cfg.trainer.policy_mini_batch_size}"
+        )
+        policy_mini_batch_size_per_gpu = (
+            cfg.trainer.policy_mini_batch_size * cfg.generator.n_samples_per_prompt // policy_dp_size
+        )
+        assert policy_mini_batch_size_per_gpu > 0, (
+            f"Invalid policy_mini_batch_size_per_gpu: {policy_mini_batch_size_per_gpu}. "
+            f"mini_batch_size={cfg.trainer.policy_mini_batch_size}, "
+            f"n_samples_per_prompt={cfg.generator.n_samples_per_prompt}, "
+            f"dp_size={policy_dp_size}"
+        )
+        assert policy_mini_batch_size_per_gpu % cfg.trainer.micro_train_batch_size_per_gpu == 0, (
+            f"normalized policy_mini_batch_size_per_gpu {policy_mini_batch_size_per_gpu} should be divisible "
+            f"by micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
+        )
+        assert policy_mini_batch_size_per_gpu // cfg.trainer.micro_train_batch_size_per_gpu > 0, (
+            f"normalized policy_mini_batch_size_per_gpu {policy_mini_batch_size_per_gpu} should be larger than "
+            f"micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
+        )
+        policy_train_batch_size_per_gpu = (
+            cfg.trainer.train_batch_size * cfg.generator.n_samples_per_prompt // policy_dp_size
+        )
 
-    # `train_batch_size_per_gpu` should be divisible by `policy_mini_batch_size_per_gpu`
-    assert policy_train_batch_size_per_gpu % policy_mini_batch_size_per_gpu == 0, (
-        f"normalized policy_train_batch_size_per_gpu (train_batch_size * n_samples_per_prompt // policy_dp_size) "
-        f"{policy_train_batch_size_per_gpu} should be divisible by policy_mini_batch_size_per_gpu "
-        f"(policy_mini_batch_size * n_samples_per_prompt // policy_dp_size) {policy_mini_batch_size_per_gpu}"
-    )
+        # `train_batch_size_per_gpu` should be divisible by `policy_mini_batch_size_per_gpu`
+        assert policy_train_batch_size_per_gpu % policy_mini_batch_size_per_gpu == 0, (
+            f"normalized policy_train_batch_size_per_gpu (train_batch_size * n_samples_per_prompt // policy_dp_size) "
+            f"{policy_train_batch_size_per_gpu} should be divisible by policy_mini_batch_size_per_gpu "
+            f"(policy_mini_batch_size * n_samples_per_prompt // policy_dp_size) {policy_mini_batch_size_per_gpu}"
+        )
 
     # Validate critic mini batch size
     critic_world_size = cfg.trainer.placement.critic_num_nodes * cfg.trainer.placement.critic_num_gpus_per_node
     critic_dp_size = critic_world_size // cfg.trainer.critic.sequence_parallel_size
 
     if cfg.trainer.critic.model.path is not None:
-        assert cfg.trainer.train_batch_size % cfg.trainer.critic_mini_batch_size == 0, (
-            f"train_batch_size {cfg.trainer.train_batch_size} should be divisible by "
-            f"critic_mini_batch_size {cfg.trainer.critic_mini_batch_size}"
-        )
-        critic_mini_batch_size_per_gpu = (
-            cfg.trainer.critic_mini_batch_size * cfg.generator.n_samples_per_prompt // critic_dp_size
-        )
-        assert critic_mini_batch_size_per_gpu > 0, (
-            f"Invalid critic_mini_batch_size_per_gpu: {critic_mini_batch_size_per_gpu}. "
-            f"mini_batch_size={cfg.trainer.critic_mini_batch_size}, "
-            f"n_samples_per_prompt={cfg.generator.n_samples_per_prompt}, "
-            f"dp_size={critic_dp_size}"
-        )
-        assert critic_mini_batch_size_per_gpu % cfg.trainer.micro_train_batch_size_per_gpu == 0, (
-            f"normalized critic_mini_batch_size_per_gpu {critic_mini_batch_size_per_gpu} should be divisible by "
-            f"micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
-        )
-        assert critic_mini_batch_size_per_gpu // cfg.trainer.micro_train_batch_size_per_gpu > 0, (
-            f"normalized critic_mini_batch_size_per_gpu {critic_mini_batch_size_per_gpu} should be larger than "
-            f"micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
-        )
-        critic_train_batch_size_per_gpu = (
-            cfg.trainer.train_batch_size * cfg.generator.n_samples_per_prompt // critic_dp_size
-        )
-        assert critic_train_batch_size_per_gpu % critic_mini_batch_size_per_gpu == 0, (
-            f"normalized critic_train_batch_size_per_gpu (train_batch_size * n_samples_per_prompt // critic_dp_size) "
-            f"{critic_train_batch_size_per_gpu} should be divisible by critic_mini_batch_size_per_gpu "
-            f"(critic_mini_batch_size * n_samples_per_prompt // critic_dp_size) {critic_mini_batch_size_per_gpu}"
-        )
+        if not use_state_action_critic_updates:
+            assert cfg.trainer.train_batch_size % cfg.trainer.critic_mini_batch_size == 0, (
+                f"train_batch_size {cfg.trainer.train_batch_size} should be divisible by "
+                f"critic_mini_batch_size {cfg.trainer.critic_mini_batch_size}"
+            )
+            critic_mini_batch_size_per_gpu = (
+                cfg.trainer.critic_mini_batch_size * cfg.generator.n_samples_per_prompt // critic_dp_size
+            )
+            assert critic_mini_batch_size_per_gpu > 0, (
+                f"Invalid critic_mini_batch_size_per_gpu: {critic_mini_batch_size_per_gpu}. "
+                f"mini_batch_size={cfg.trainer.critic_mini_batch_size}, "
+                f"n_samples_per_prompt={cfg.generator.n_samples_per_prompt}, "
+                f"dp_size={critic_dp_size}"
+            )
+            assert critic_mini_batch_size_per_gpu % cfg.trainer.micro_train_batch_size_per_gpu == 0, (
+                f"normalized critic_mini_batch_size_per_gpu {critic_mini_batch_size_per_gpu} should be divisible by "
+                f"micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
+            )
+            assert critic_mini_batch_size_per_gpu // cfg.trainer.micro_train_batch_size_per_gpu > 0, (
+                f"normalized critic_mini_batch_size_per_gpu {critic_mini_batch_size_per_gpu} should be larger than "
+                f"micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
+            )
+            critic_train_batch_size_per_gpu = (
+                cfg.trainer.train_batch_size * cfg.generator.n_samples_per_prompt // critic_dp_size
+            )
+            assert critic_train_batch_size_per_gpu % critic_mini_batch_size_per_gpu == 0, (
+                f"normalized critic_train_batch_size_per_gpu (train_batch_size * n_samples_per_prompt // critic_dp_size) "
+                f"{critic_train_batch_size_per_gpu} should be divisible by critic_mini_batch_size_per_gpu "
+                f"(critic_mini_batch_size * n_samples_per_prompt // critic_dp_size) {critic_mini_batch_size_per_gpu}"
+            )
 
     # Validate training batch size is larger than the least common multiple of the DP sizes of policy (and ref if used).
     lcm_dp_size = policy_dp_size
@@ -239,6 +248,16 @@ def validate_cfg(cfg: SkyRLTrainConfig):
             cfg.trainer.critic.model.path
         ), "`trainer.critic.model.path` should be provided for PPO training, got `None`"
 
+    state_action_cfg = cfg.trainer.algorithm.state_action
+    for field_name in ("policy_updates_per_batch", "critic_updates_per_batch"):
+        value = getattr(state_action_cfg, field_name)
+        if value is not None:
+            assert value > 0, f"trainer.algorithm.state_action.{field_name} must be greater than 0, got {value}"
+    assert state_action_cfg.actor_advantage_type in {"q_minus_v", "gae", "td_delta"}, (
+        "trainer.algorithm.state_action.actor_advantage_type must be one of "
+        "{'q_minus_v', 'gae', 'td_delta'}"
+    )
+
     if cfg.trainer.algorithm.advantage_estimator == "state_action_td":
         assert cfg.trainer.strategy in (
             "fsdp",
@@ -251,13 +270,15 @@ def validate_cfg(cfg: SkyRLTrainConfig):
             cfg.generator.use_conversation_multi_turn
         ), "state_action_td requires generator.use_conversation_multi_turn=true"
         assert cfg.environment.env_class == "babyai_text", "state_action_td is only supported for babyai_text in v1"
-        if cfg.trainer.algorithm.policy_loss_type == "regular" and cfg.trainer.algorithm.loss_reduction == "token_mean":
-            logger.warning(
-                "state_action_td works best with sequence-level policy updates. "
-                "Switching trainer.algorithm.policy_loss_type to 'gspo' and loss_reduction to 'sequence_mean'."
-            )
-            cfg.trainer.algorithm.policy_loss_type = "gspo"
-            cfg.trainer.algorithm.loss_reduction = "sequence_mean"
+    else:
+        assert state_action_cfg.policy_updates_per_batch is None, (
+            "trainer.algorithm.state_action.policy_updates_per_batch is only supported with "
+            "trainer.algorithm.advantage_estimator=state_action_td"
+        )
+        assert state_action_cfg.critic_updates_per_batch is None, (
+            "trainer.algorithm.state_action.critic_updates_per_batch is only supported with "
+            "trainer.algorithm.advantage_estimator=state_action_td"
+        )
 
     assert not (
         cfg.trainer.algorithm.use_kl_in_reward and cfg.trainer.algorithm.use_kl_loss

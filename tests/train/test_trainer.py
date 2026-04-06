@@ -724,7 +724,72 @@ def test_state_action_td_advantages_and_targets(dummy_config, dummy_generator):
     assert metrics["invalid_action_rate"] == approx(0.5)
 
 
-def test_validate_cfg_state_action_td_sets_sequence_level_defaults(dummy_config):
+@pytest.mark.parametrize(
+    ("actor_advantage_type", "expected_advantages"),
+    [
+        ("q_minus_v", torch.tensor([[0.4, 0.4, 0.0], [0.0, 0.4, 0.0]], dtype=torch.float32)),
+        ("gae", torch.tensor([[0.394, 0.394, 0.0], [0.0, 0.2, 0.0]], dtype=torch.float32)),
+        ("td_delta", torch.tensor([[0.25, 0.25, 0.0], [0.0, 0.2, 0.0]], dtype=torch.float32)),
+    ],
+)
+def test_state_action_td_actor_advantage_types(
+    dummy_config, dummy_generator, actor_advantage_type, expected_advantages
+):
+    cfg = dummy_config
+    cfg.trainer.algorithm.advantage_estimator = "state_action_td"
+    cfg.trainer.algorithm.use_kl_loss = False
+    cfg.trainer.algorithm.use_kl_in_reward = False
+    cfg.trainer.algorithm.advantage_batch_normalize = False
+    cfg.trainer.algorithm.gamma = 0.9
+    cfg.trainer.algorithm.lambd = 0.8
+    cfg.trainer.algorithm.state_action.actor_advantage_type = actor_advantage_type
+    cfg.trainer.critic.model.path = "dummy-critic"
+    cfg.trainer.strategy = "fsdp2"
+    cfg.generator.step_wise_trajectories = True
+    cfg.generator.use_conversation_multi_turn = True
+    cfg.generator.max_turns = 2
+    cfg.environment.env_class = "babyai_text"
+
+    trainer = RayPPOTrainer(
+        cfg=cfg,
+        tracker=None,
+        tokenizer=None,
+        train_dataset=DummyDataset(),
+        eval_dataset=DummyDataset(),
+        inference_engine_client=None,
+        generator=dummy_generator,
+    )
+
+    data = TrainingInputBatch(
+        {
+            "sequences": torch.tensor([[11, 12, 21, 22, 23], [11, 12, 31, 32, 33]], dtype=torch.long),
+            "response_mask": torch.tensor([[1, 1, 1], [1, 1, 1]], dtype=torch.long),
+            "loss_mask": torch.tensor([[1, 1, 0], [0, 1, 0]], dtype=torch.long),
+            "rewards": torch.tensor([[0.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=torch.float32),
+            "is_last_step": torch.tensor([False, True], dtype=torch.bool),
+        }
+    )
+    data.metadata = {
+        "uids": ["traj-0", "traj-0"],
+        "trajectory_ids": ["traj-0", "traj-0"],
+        "avg_response_length": 3.0,
+        "step_metadata": [
+            {"parsed_action": "turn left", "valid_action": True, "success": False, "steps": 1},
+            {"parsed_action": "done", "valid_action": False, "success": True, "steps": 2},
+        ],
+    }
+
+    data = trainer._annotate_state_action_step_fields(data)
+    data["q_values"] = torch.tensor([0.6, 1.2], dtype=torch.float32)
+    data["v_values"] = torch.tensor([0.2, 0.8], dtype=torch.float32)
+    data["next_v_values"] = torch.tensor([0.5, 0.3], dtype=torch.float32)
+
+    data = trainer.compute_advantages_and_returns(data)
+
+    assert torch.allclose(data["advantages"], expected_advantages, atol=1e-6)
+
+
+def test_validate_cfg_state_action_td_preserves_policy_loss_config(dummy_config):
     cfg = dummy_config
     cfg.trainer.algorithm.advantage_estimator = "state_action_td"
     cfg.trainer.algorithm.use_kl_loss = False
@@ -742,8 +807,8 @@ def test_validate_cfg_state_action_td_sets_sequence_level_defaults(dummy_config)
     with patch("skyrl.train.utils.utils.validate_batch_sizes"):
         validate_cfg(cfg)
 
-    assert cfg.trainer.algorithm.policy_loss_type == "gspo"
-    assert cfg.trainer.algorithm.loss_reduction == "sequence_mean"
+    assert cfg.trainer.algorithm.policy_loss_type == "regular"
+    assert cfg.trainer.algorithm.loss_reduction == "token_mean"
 
 
 def test_validate_cfg_requires_wandb_api_key_for_logger_list(dummy_config):

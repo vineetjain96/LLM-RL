@@ -391,6 +391,7 @@ def test_generator_output_concatenation():
         "stop_reasons": ["stop", "stop"],
         "rollout_logprobs": [[0.1, 0.2], [0.3, 0.4]],
         "step_metadata": [{"parsed_action": "left"}, {"parsed_action": "right"}],
+        "step_model_token_counts": [[2], [2]],
     }
 
     generator_output_2: GeneratorOutput = {
@@ -401,6 +402,7 @@ def test_generator_output_concatenation():
         "stop_reasons": ["stop", "stop"],
         "rollout_logprobs": [[0.5, 0.6, 0.7], [0.8]],
         "step_metadata": [{"parsed_action": "done"}, {"parsed_action": "pickup"}],
+        "step_model_token_counts": [[3], [1]],
     }
 
     generator_outputs = [generator_output_1, generator_output_2]
@@ -418,6 +420,7 @@ def test_generator_output_concatenation():
         {"parsed_action": "done"},
         {"parsed_action": "pickup"},
     ]
+    assert concatenated_output["step_model_token_counts"] == [[2], [2], [3], [1]]
 
     # Validate rollout metrics
     expected_rollout_metrics = {
@@ -427,6 +430,14 @@ def test_generator_output_concatenation():
         "generate/std_num_tokens": np.std([2, 2, 3, 1]).item(),
         "generate/avg_tokens_non_zero_rewards": 2.0,
         "generate/avg_tokens_zero_rewards": 0,
+        "response_lengths/min_num_model_tokens": 1,
+        "response_lengths/max_num_model_tokens": 3,
+        "response_lengths/avg_num_model_tokens": 2.0,
+        "response_lengths/std_num_model_tokens": np.std([2, 2, 3, 1]).item(),
+        "response_lengths/min_num_model_tokens_per_step": 1,
+        "response_lengths/max_num_model_tokens_per_step": 3,
+        "response_lengths/avg_num_model_tokens_per_step": 2.0,
+        "response_lengths/std_num_model_tokens_per_step": np.std([2, 2, 3, 1]).item(),
     }
     assert concatenated_output["rollout_metrics"].keys() == expected_rollout_metrics.keys()
     for key, value in expected_rollout_metrics.items():
@@ -1756,8 +1767,109 @@ async def test_step_wise_rollout_metrics_are_trajectory_level(mock_make, mock_to
     assert rollout_metrics["generate/min_num_tokens"] == 10
     assert rollout_metrics["generate/max_num_tokens"] == 10
     assert rollout_metrics["generate/avg_num_tokens"] == pytest.approx(10.0)
+    assert rollout_metrics["response_lengths/min_num_model_tokens"] == 8
+    assert rollout_metrics["response_lengths/max_num_model_tokens"] == 8
+    assert rollout_metrics["response_lengths/avg_num_model_tokens"] == pytest.approx(8.0)
+    assert rollout_metrics["response_lengths/min_num_model_tokens_per_step"] == 4
+    assert rollout_metrics["response_lengths/max_num_model_tokens_per_step"] == 4
+    assert rollout_metrics["response_lengths/avg_num_model_tokens_per_step"] == pytest.approx(4.0)
     assert rollout_metrics["environment/avg_steps"] == pytest.approx(2.0)
     assert rollout_metrics["environment/success_rate"] == pytest.approx(1.0)
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_non_step_wise_rollout_metrics_include_per_step_model_token_stats(
+    mock_make, mock_tokenizer, mock_llm, mock_env_cfg
+):
+    """Non-step-wise generation should still report per-step model token metrics."""
+    mock_env_cfg.env_class = "babyai_text"
+    mock_tokenizer.eos_token_id = 4
+
+    def apply_chat_template_side_effect(messages, **kwargs):
+        if kwargs.get("tokenize", True):
+            return [201, 202]
+        return "".join([m.get("content", "") for m in messages])
+
+    mock_tokenizer.apply_chat_template.side_effect = apply_chat_template_side_effect
+
+    async def llm_generate_side_effect(input_batch):
+        num = len(input_batch["prompt_token_ids"]) if "prompt_token_ids" in input_batch else len(input_batch["prompts"])
+        return {
+            "responses": ["step"] * num,
+            "stop_reasons": ["stop"] * num,
+            "response_logprobs": None,
+            "response_ids": [[10, 11, 12, mock_tokenizer.eos_token_id] for _ in range(num)],
+        }
+
+    mock_llm.generate = AsyncMock(side_effect=llm_generate_side_effect)
+
+    class MultiStepEnv(BaseTextEnv):
+        def __init__(self):
+            super().__init__()
+            self.turns = 0
+
+        def init(self, prompt):
+            return prompt, {}
+
+        def step(self, action):
+            self.turns += 1
+            if self.turns == 1:
+                return BaseTextEnvStepOutput(
+                    observations=[{"role": "user", "content": "obs1"}],
+                    reward=0.5,
+                    done=False,
+                    metadata={"parsed_action": "turn left", "valid_action": True, "success": False, "steps": 1},
+                )
+            return BaseTextEnvStepOutput(
+                observations=[],
+                reward=1.0,
+                done=True,
+                metadata={"parsed_action": "done", "valid_action": True, "success": True, "steps": 2},
+            )
+
+        def get_metrics(self):
+            return {"steps": self.turns, "success": True}
+
+    mock_make.side_effect = lambda *args, **kwargs: MultiStepEnv()
+
+    cfg = GeneratorConfig()
+    cfg.sampling_params.max_generate_length = 50
+    cfg.sampling_params.logprobs = None
+    cfg.apply_overlong_filtering = False
+    cfg.max_input_length = 512
+    cfg.batched = False
+    cfg.max_turns = 10
+    cfg.zero_reward_on_non_stop = False
+    cfg.use_conversation_multi_turn = True
+    cfg.step_wise_trajectories = False
+    cfg.chat_template = ChatTemplateConfig(source="name", name_or_path=None)
+
+    generator = SkyRLGymGenerator(
+        generator_cfg=cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+    )
+    generator.base_conversation_token_ids = []
+
+    input_batch: GeneratorInput = {
+        "prompts": [[{"role": "user", "content": "Q?"}]],
+        "env_extras": [{"test": "value"}],
+        "env_classes": [mock_env_cfg.env_class],
+        "trajectory_ids": None,
+    }
+
+    generator_output: GeneratorOutput = await generator.generate(input_batch)
+    rollout_metrics = generator_output["rollout_metrics"]
+
+    assert rollout_metrics["response_lengths/min_num_model_tokens"] == 8
+    assert rollout_metrics["response_lengths/max_num_model_tokens"] == 8
+    assert rollout_metrics["response_lengths/avg_num_model_tokens"] == pytest.approx(8.0)
+    assert rollout_metrics["response_lengths/min_num_model_tokens_per_step"] == 4
+    assert rollout_metrics["response_lengths/max_num_model_tokens_per_step"] == 4
+    assert rollout_metrics["response_lengths/avg_num_model_tokens_per_step"] == pytest.approx(4.0)
+    assert generator_output["step_model_token_counts"] == [[4, 4]]
 
 
 def test_concatenate_step_wise_generator_outputs_uses_trajectory_lengths():
@@ -1779,6 +1891,7 @@ def test_concatenate_step_wise_generator_outputs_uses_trajectory_lengths():
         "trajectory_ids": [tid_a, tid_a, tid_b],
         "is_last_step": [False, True, True],
         "step_metadata": [{}, {}, {}],
+        "step_model_token_counts": [[2, 3], [1]],
     }
     generator_output_2: GeneratorOutput = {
         "prompt_token_ids": [[4], [5]],
@@ -1791,6 +1904,7 @@ def test_concatenate_step_wise_generator_outputs_uses_trajectory_lengths():
         "trajectory_ids": [tid_c, tid_c],
         "is_last_step": [False, True],
         "step_metadata": [{}, {}],
+        "step_model_token_counts": [[2, 1]],
     }
 
     concatenated_output = concatenate_generator_outputs([generator_output_1, generator_output_2])
@@ -1800,3 +1914,13 @@ def test_concatenate_step_wise_generator_outputs_uses_trajectory_lengths():
     assert rollout_metrics["generate/max_num_tokens"] == 5
     assert rollout_metrics["generate/avg_num_tokens"] == pytest.approx(3.0)
     assert rollout_metrics["generate/std_num_tokens"] == pytest.approx(np.std([5, 1, 3]).item())
+    assert rollout_metrics["response_lengths/min_num_model_tokens"] == 1
+    assert rollout_metrics["response_lengths/max_num_model_tokens"] == 5
+    assert rollout_metrics["response_lengths/avg_num_model_tokens"] == pytest.approx(3.0)
+    assert rollout_metrics["response_lengths/std_num_model_tokens"] == pytest.approx(np.std([5, 1, 3]).item())
+    assert rollout_metrics["response_lengths/min_num_model_tokens_per_step"] == 1
+    assert rollout_metrics["response_lengths/max_num_model_tokens_per_step"] == 3
+    assert rollout_metrics["response_lengths/avg_num_model_tokens_per_step"] == pytest.approx(1.8)
+    assert rollout_metrics["response_lengths/std_num_model_tokens_per_step"] == pytest.approx(
+        np.std([2, 3, 1, 2, 1]).item()
+    )
