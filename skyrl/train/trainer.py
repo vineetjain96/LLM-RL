@@ -140,39 +140,48 @@ class RayPPOTrainer:
     def uses_state_action_td(self) -> bool:
         return self.cfg.trainer.algorithm.advantage_estimator == "state_action_td"
 
-    def _get_state_action_updates_per_batch(self, model: str) -> Optional[int]:
+    def _get_state_action_mini_batch_updates(self, model: str) -> Optional[int]:
         if not self.uses_state_action_td:
             return None
 
         state_action_cfg = self.cfg.trainer.algorithm.state_action
         if model == "policy":
-            return state_action_cfg.policy_updates_per_batch
+            return state_action_cfg.policy_mini_batch_updates
         if model == "critic":
-            return state_action_cfg.critic_updates_per_batch
+            return state_action_cfg.critic_mini_batch_updates
         raise ValueError(f"Unknown model '{model}'")
 
-    def _get_optimizer_steps_per_train_batch(self, model: str) -> int:
-        configured_updates = self._get_state_action_updates_per_batch(model)
-        if configured_updates is not None:
-            return configured_updates * self.cfg.trainer.update_epochs_per_batch
+    def _get_training_epochs_per_batch(self, model: str) -> int:
+        if self.uses_state_action_td:
+            state_action_cfg = self.cfg.trainer.algorithm.state_action
+            if model == "policy":
+                return state_action_cfg.policy_epochs_per_batch
+            if model == "critic":
+                return state_action_cfg.critic_epochs_per_batch
+            raise ValueError(f"Unknown model '{model}'")
+        return self.cfg.trainer.update_epochs_per_batch
 
-        if model == "policy":
+    def _get_optimizer_steps_per_train_batch(self, model: str) -> int:
+        state_action_updates = self._get_state_action_mini_batch_updates(model)
+        if state_action_updates is not None:
+            base_steps = state_action_updates
+        elif model == "policy":
             base_steps = self.cfg.trainer.train_batch_size // self.cfg.trainer.policy_mini_batch_size
         elif model == "critic":
             base_steps = self.cfg.trainer.train_batch_size // self.cfg.trainer.critic_mini_batch_size
         else:
             raise ValueError(f"Unknown model '{model}'")
 
-        return base_steps * self.cfg.trainer.update_epochs_per_batch
+        return base_steps * self._get_training_epochs_per_batch(model)
 
     def _resolve_training_mini_batch_size(self, model: str, data_batch_size: int) -> int:
-        configured_updates = self._get_state_action_updates_per_batch(model)
-        if configured_updates is not None:
-            assert data_batch_size % configured_updates == 0, (
+        state_action_updates = self._get_state_action_mini_batch_updates(model)
+        if state_action_updates is not None:
+            assert data_batch_size % state_action_updates == 0, (
                 f"Expanded training batch size {data_batch_size} must be divisible by "
-                f"trainer.algorithm.state_action.{model}_updates_per_batch={configured_updates}"
+                f"trainer.algorithm.state_action.{model}_mini_batch_updates={state_action_updates}"
             )
-            return data_batch_size // configured_updates
+            return data_batch_size // state_action_updates
 
         n_samples = self.cfg.generator.n_samples_per_prompt
         if model == "policy":
@@ -1218,11 +1227,11 @@ class RayPPOTrainer:
             required_multiple = math.lcm(required_multiple, lcm_dp_size)
 
         n_samples = self.cfg.generator.n_samples_per_prompt
-        policy_updates = self._get_state_action_updates_per_batch("policy")
+        policy_updates = self._get_state_action_mini_batch_updates("policy")
         if policy_updates is None:
             required_multiple = math.lcm(required_multiple, self.cfg.trainer.policy_mini_batch_size * n_samples)
         if self.has_critic:
-            critic_updates = self._get_state_action_updates_per_batch("critic")
+            critic_updates = self._get_state_action_mini_batch_updates("critic")
             if critic_updates is None:
                 required_multiple = math.lcm(required_multiple, self.cfg.trainer.critic_mini_batch_size * n_samples)
 
@@ -1497,7 +1506,7 @@ class RayPPOTrainer:
         all_chunk_refs = self.dispatch.stage_data(model, data, mini_batch_size)
 
         # Training loop over epochs and mini-batches
-        for _epoch in range(self.cfg.trainer.update_epochs_per_batch):
+        for _epoch in range(self._get_training_epochs_per_batch(model)):
             for chunk_refs in all_chunk_refs:
                 status = self.dispatch.forward_backward_from_staged(model, chunk_refs)
                 for k, v in status.items():

@@ -254,6 +254,68 @@ def test_pad_batch_pads_to_mini_batch_multiple(dummy_config):
     assert padded.metadata["trajectory_ids"][-5:] == ["pad0", "pad1", "pad2", "pad3", "pad4"]
 
 
+def test_state_action_td_custom_critic_epochs_use_full_batch(dummy_config, dummy_generator):
+    cfg = dummy_config
+    cfg.trainer.train_batch_size = 8
+    cfg.trainer.policy_mini_batch_size = 8
+    cfg.trainer.critic_mini_batch_size = 8
+    cfg.generator.n_samples_per_prompt = 1
+    cfg.trainer.critic.model.path = "dummy"
+    cfg.trainer.algorithm.advantage_estimator = "state_action_td"
+    cfg.trainer.algorithm.state_action.policy_mini_batch_updates = 1
+    cfg.trainer.algorithm.state_action.critic_mini_batch_updates = 1
+    cfg.trainer.algorithm.state_action.policy_epochs_per_batch = 1
+    cfg.trainer.algorithm.state_action.critic_epochs_per_batch = 4
+
+    trainer = RayPPOTrainer(
+        cfg=cfg,
+        tracker=None,
+        tokenizer=None,
+        train_dataset=DummyDataset(),
+        eval_dataset=DummyDataset(),
+        inference_engine_client=None,
+        generator=dummy_generator,
+    )
+
+    assert trainer._resolve_training_mini_batch_size("critic", data_batch_size=24) == 24
+    assert trainer._get_training_epochs_per_batch("critic") == 4
+    assert trainer._get_optimizer_steps_per_train_batch("critic") == 4
+
+
+def test_execute_training_step_repeats_full_critic_batch_for_custom_epochs(dummy_config, dummy_generator):
+    cfg = dummy_config
+    cfg.trainer.train_batch_size = 8
+    cfg.trainer.critic_mini_batch_size = 8
+    cfg.generator.n_samples_per_prompt = 1
+    cfg.trainer.critic.model.path = "dummy"
+    cfg.trainer.algorithm.advantage_estimator = "state_action_td"
+    cfg.trainer.algorithm.state_action.critic_mini_batch_updates = 1
+    cfg.trainer.algorithm.state_action.critic_epochs_per_batch = 4
+
+    trainer = RayPPOTrainer(
+        cfg=cfg,
+        tracker=None,
+        tokenizer=None,
+        train_dataset=DummyDataset(),
+        eval_dataset=DummyDataset(),
+        inference_engine_client=None,
+        generator=dummy_generator,
+    )
+    trainer.dispatch = MagicMock()
+    trainer.dispatch.stage_data.return_value = [["chunk"]]
+    trainer.dispatch.forward_backward_from_staged.return_value = {"loss": 1.0}
+    trainer.dispatch.optim_step.return_value = 0.5
+
+    data = TrainingInputBatch({"sequences": torch.ones(24, 2, dtype=torch.long)})
+    data.metadata = {}
+
+    trainer._execute_training_step("critic", data)
+
+    trainer.dispatch.stage_data.assert_called_once_with("critic", data, 24)
+    assert trainer.dispatch.forward_backward_from_staged.call_count == 4
+    assert trainer.dispatch.optim_step.call_count == 4
+
+
 @patch("skyrl.train.trainer.convert_prompts_responses_to_batch_tensors")
 def test_convert_to_training_input_step_wise_avg_response_length_is_trajectory_level(
     mock_convert_to_batch_tensors, dummy_config, dummy_generator
@@ -992,6 +1054,27 @@ def test_validate_cfg_state_action_td_preserves_policy_loss_config(dummy_config)
 
     assert cfg.trainer.algorithm.policy_loss_type == "regular"
     assert cfg.trainer.algorithm.loss_reduction == "token_mean"
+
+
+def test_validate_cfg_state_action_td_allows_combined_update_controls(dummy_config):
+    cfg = dummy_config
+    cfg.trainer.algorithm.advantage_estimator = "state_action_td"
+    cfg.trainer.algorithm.use_kl_loss = False
+    cfg.trainer.algorithm.use_kl_in_reward = False
+    cfg.trainer.critic.model.path = "dummy-critic"
+    cfg.trainer.strategy = "fsdp2"
+    cfg.generator.async_engine = True
+    cfg.generator.batched = False
+    cfg.generator.step_wise_trajectories = True
+    cfg.generator.use_conversation_multi_turn = True
+    cfg.generator.max_turns = 2
+    cfg.generator.max_input_length = cfg.trainer.max_prompt_length
+    cfg.environment.env_class = "babyai_text"
+    cfg.trainer.algorithm.state_action.critic_mini_batch_updates = 1
+    cfg.trainer.algorithm.state_action.critic_epochs_per_batch = 4
+
+    with patch("skyrl.train.utils.utils.validate_batch_sizes"):
+        validate_cfg(cfg)
 
 
 def test_validate_cfg_requires_wandb_api_key_for_logger_list(dummy_config):

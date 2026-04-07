@@ -71,9 +71,8 @@ def validate_batch_sizes(cfg: SkyRLTrainConfig):
        be incomplete.
     """
     uses_state_action_td = cfg.trainer.algorithm.advantage_estimator == "state_action_td"
-    state_action_cfg = cfg.trainer.algorithm.state_action
-    use_state_action_policy_updates = uses_state_action_td and state_action_cfg.policy_updates_per_batch is not None
-    use_state_action_critic_updates = uses_state_action_td and state_action_cfg.critic_updates_per_batch is not None
+    use_state_action_policy_updates = uses_state_action_td
+    use_state_action_critic_updates = uses_state_action_td
 
     if not use_state_action_policy_updates:
         assert cfg.trainer.train_batch_size >= cfg.trainer.policy_mini_batch_size
@@ -249,10 +248,14 @@ def validate_cfg(cfg: SkyRLTrainConfig):
         ), "`trainer.critic.model.path` should be provided for PPO training, got `None`"
 
     state_action_cfg = cfg.trainer.algorithm.state_action
-    for field_name in ("policy_updates_per_batch", "critic_updates_per_batch"):
+    for field_name in (
+        "policy_mini_batch_updates",
+        "critic_mini_batch_updates",
+        "policy_epochs_per_batch",
+        "critic_epochs_per_batch",
+    ):
         value = getattr(state_action_cfg, field_name)
-        if value is not None:
-            assert value > 0, f"trainer.algorithm.state_action.{field_name} must be greater than 0, got {value}"
+        assert value > 0, f"trainer.algorithm.state_action.{field_name} must be greater than 0, got {value}"
     assert state_action_cfg.actor_advantage_type in {"q_minus_v", "gae", "td_delta"}, (
         "trainer.algorithm.state_action.actor_advantage_type must be one of "
         "{'q_minus_v', 'gae', 'td_delta'}"
@@ -277,15 +280,6 @@ def validate_cfg(cfg: SkyRLTrainConfig):
                 f"overriding q_loss_coef from {state_action_cfg.q_loss_coef} to 0.0"
             )
             state_action_cfg.q_loss_coef = 0.0
-    else:
-        assert state_action_cfg.policy_updates_per_batch is None, (
-            "trainer.algorithm.state_action.policy_updates_per_batch is only supported with "
-            "trainer.algorithm.advantage_estimator=state_action_td"
-        )
-        assert state_action_cfg.critic_updates_per_batch is None, (
-            "trainer.algorithm.state_action.critic_updates_per_batch is only supported with "
-            "trainer.algorithm.advantage_estimator=state_action_td"
-        )
 
     assert not (
         cfg.trainer.algorithm.use_kl_in_reward and cfg.trainer.algorithm.use_kl_loss

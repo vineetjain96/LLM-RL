@@ -306,8 +306,10 @@ class StateActionConfig(BaseConfig):
     critic_head_bias: bool = False
     actor_advantage_type: str = "q_minus_v"
     analyze_next_v_mismatch: bool = False
-    policy_updates_per_batch: Optional[int] = None
-    critic_updates_per_batch: Optional[int] = None
+    policy_mini_batch_updates: int = 1
+    critic_mini_batch_updates: int = 1
+    policy_epochs_per_batch: int = 1
+    critic_epochs_per_batch: int = 1
 
 
 # see https://docs.skyrl.ai/docs/algorithms/off_policy_correction for more details
