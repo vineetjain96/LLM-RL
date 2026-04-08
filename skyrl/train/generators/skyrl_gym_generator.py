@@ -441,6 +441,16 @@ class SkyRLGymGenerator(GeneratorInterface):
                     agent_loop_state, turn_output
                 )
 
+            if is_step_wise and self._should_emit_bootstrap_state(env_step_output):
+                bootstrap_prompt_ids = self._build_step_wise_bootstrap_prompt_ids(
+                    agent_loop_state.chat_history,
+                    retokenize_chat_history,
+                )
+                last_step_output = agent_loop_output.step_outputs[-1]
+                bootstrap_metadata = dict(last_step_output.step_metadata or {})
+                bootstrap_metadata["bootstrap_prompt_ids"] = bootstrap_prompt_ids
+                last_step_output.step_metadata = bootstrap_metadata
+
             per_step_rewards.append((step_reward, agent_loop_state.response_end_idx))
 
         # Get environment-specific metrics after the episode is done
@@ -567,6 +577,26 @@ class SkyRLGymGenerator(GeneratorInterface):
                     token_level_rewards[idx] += step_reward
             reward_out = token_level_rewards
         return reward_out
+
+    def _build_step_wise_bootstrap_prompt_ids(
+        self,
+        chat_history: ConversationType,
+        retokenize_chat_history: bool,
+    ) -> List[int]:
+        """Build the prompt ids for a bootstrap-only boundary state."""
+        return self.tokenizer.apply_chat_template(
+            chat_history,
+            add_generation_prompt=True,
+            chat_template=self.custom_chat_template if retokenize_chat_history else None,
+            tokenize=True,
+            return_dict=False,
+            **self.generator_cfg.chat_template_kwargs,
+        )
+
+    @staticmethod
+    def _should_emit_bootstrap_state(env_step_output: BaseTextEnvStepOutput) -> bool:
+        metadata = dict(env_step_output.get("metadata", {}) or {})
+        return bool(metadata.get("truncated", False)) and not bool(metadata.get("terminated", False))
 
     def get_obs_ids_from_obs(self, new_obs: ConversationType, is_done: bool) -> List[int]:
         """

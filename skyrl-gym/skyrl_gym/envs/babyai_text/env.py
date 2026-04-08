@@ -248,6 +248,17 @@ class BabyAITextEnv(BaseTextEnv):
             return f"{obj.color} {obj.type}"
         return None
 
+    def _format_current_observation(self) -> str:
+        """Format the current observation for the agent."""
+        obs_text = self._get_text_observation()
+        return utils.format_observation(
+            obs_text=obs_text,
+            mission=self._mission,
+            carrying=self._get_carrying_description(),
+            step_count=self._step_count,
+            max_steps=self.max_turns,
+        )
+
     def step(self, action: str) -> BaseTextEnvStepOutput:
         """
         Execute one step in the environment.
@@ -265,7 +276,8 @@ class BabyAITextEnv(BaseTextEnv):
         action_idx = utils.parse_action(action)
 
         if action_idx is None:
-            self._done = self.turns >= self.max_turns
+            turn_limit_reached = self.turns >= self.max_turns
+            self._done = turn_limit_reached
             self._success = False
             final_reward = utils.compute_reward(
                 done=self._done,
@@ -284,17 +296,28 @@ class BabyAITextEnv(BaseTextEnv):
             )
 
             return BaseTextEnvStepOutput(
-                observations=[] if self._done else [{"role": "user", "content": feedback}],
+                observations=[{"role": "user", "content": feedback}],
                 reward=final_reward,
                 done=self._done,
-                metadata={"parsed_action": None, "valid_action": False, "success": False, "steps": self._step_count},
+                metadata={
+                    "parsed_action": None,
+                    "valid_action": False,
+                    "success": False,
+                    "steps": self._step_count,
+                    "terminated": False,
+                    "truncated": turn_limit_reached,
+                    "env_truncated": False,
+                    "turn_limit_reached": turn_limit_reached,
+                },
             )
 
         # Execute the action in the underlying environment
         self._obs, reward, terminated, truncated, info = self._env.step(action_idx)
 
-        self._done = terminated or truncated or self.turns >= self.max_turns
+        turn_limit_reached = self.turns >= self.max_turns
+        self._done = terminated or truncated or turn_limit_reached
         self._success = terminated and reward > 0
+        timed_out = truncated or turn_limit_reached
 
         # Compute reward
         final_reward = utils.compute_reward(
@@ -306,44 +329,35 @@ class BabyAITextEnv(BaseTextEnv):
             step_penalty=self.step_penalty,
         )
 
-        # Generate observation
-        if self._done:
+        action_name = utils.ACTION_NAMES.get(action_idx, "unknown")
+        metadata = {
+            "parsed_action": action_name,
+            "valid_action": True,
+            "success": self._success,
+            "steps": self._step_count,
+            "terminated": bool(terminated),
+            "truncated": bool(timed_out),
+            "env_truncated": bool(truncated),
+            "turn_limit_reached": bool(turn_limit_reached),
+        }
+
+        if self._done and terminated:
             return BaseTextEnvStepOutput(
                 observations=[],
                 reward=final_reward,
                 done=True,
-                metadata={
-                    "parsed_action": utils.ACTION_NAMES.get(action_idx, "unknown"),
-                    "valid_action": True,
-                    "success": self._success,
-                    "steps": self._step_count,
-                },
+                metadata=metadata,
             )
 
-        # Generate next observation
-        obs_text = self._get_text_observation()
-        formatted_obs = utils.format_observation(
-            obs_text=obs_text,
-            mission=self._mission,
-            carrying=self._get_carrying_description(),
-            step_count=self._step_count,
-            max_steps=self.max_turns,
-        )
-
         # Add action feedback
-        action_name = utils.ACTION_NAMES.get(action_idx, "unknown")
+        formatted_obs = self._format_current_observation()
         feedback = f"You performed: {action_name}\n\n{formatted_obs}"
 
         return BaseTextEnvStepOutput(
             observations=[{"role": "user", "content": feedback}],
             reward=final_reward,
-            done=False,
-            metadata={
-                "parsed_action": action_name,
-                "valid_action": True,
-                "success": False,
-                "steps": self._step_count,
-            },
+            done=self._done,
+            metadata=metadata,
         )
 
     def close(self):

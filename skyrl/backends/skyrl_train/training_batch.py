@@ -6,7 +6,7 @@ from typing import Any, Dict, Generic, List, Optional, TypedDict, TypeVar
 
 import numpy as np
 import torch
-from jaxtyping import Float, Integer
+from jaxtyping import Bool, Float, Integer
 
 DictType = TypeVar("DictType")
 
@@ -471,6 +471,7 @@ class TrainingInput(TypedDict, total=False):
     step_reward: Optional[Float[torch.Tensor, "batch_size"]]
     done: Optional[Float[torch.Tensor, "batch_size"]]
     bootstrap_mask: Optional[Float[torch.Tensor, "batch_size"]]
+    is_bootstrap_state: Optional[Bool[torch.Tensor, "batch_size"]]
     state_index: Optional[Integer[torch.Tensor, "batch_size"]]
     action_end_index: Optional[Integer[torch.Tensor, "batch_size"]]
     next_state_index: Optional[Integer[torch.Tensor, "batch_size"]]

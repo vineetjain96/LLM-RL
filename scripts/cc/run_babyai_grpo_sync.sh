@@ -39,7 +39,7 @@ source "$REPO_ROOT/scripts/cc/_babyai_common.sh"
 : "${MODEL_NAME:=Qwen/Qwen3-4B-Instruct-2507}"
 : "${ENV_NAME:=BabyAI-GoToLocal-v0}"
 : "${ENV_KWARGS_JSON:="{}"}"
-: "${MAX_TURNS:=8}"
+: "${MAX_TURNS:=16}"
 : "${EXPERIMENT_ROOT:="$HOME/scratch/babyai"}"
 
 : "${NUM_GPUS:=4}"
@@ -62,7 +62,7 @@ source "$REPO_ROOT/scripts/cc/_babyai_common.sh"
 
 : "${MAX_PROMPT_LENGTH:=1024}"
 : "${MAX_INPUT_LENGTH:=16384}"
-: "${MAX_GENERATE_LENGTH:=2048}"
+: "${MAX_GENERATE_LENGTH:=1024}"
 : "${N_SAMPLES_PER_PROMPT:=4}"
 
 : "${LR:=1.0e-6}"

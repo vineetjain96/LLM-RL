@@ -199,6 +199,125 @@ class RayPPOTrainer:
         last_index = mask.size(-1) - last_from_end - 1
         return torch.where(has_any, last_index, torch.zeros_like(last_index))
 
+    def _expand_state_action_bootstrap_rows(
+        self,
+        generator_output: GeneratorOutput,
+        uids: List[str],
+    ) -> tuple[
+        List[List[int]],
+        List[List[int]],
+        List[List[float]],
+        List[List[int]],
+        Optional[List[List[float]]],
+        Optional[List[List[List[List[int]]]]],
+        Optional[List[Any]],
+        Optional[List[bool]],
+        Optional[List[Dict[str, Any]]],
+        List[str],
+    ]:
+        prompt_ids: List[List[int]] = generator_output["prompt_token_ids"]
+        response_ids: List[List[int]] = generator_output["response_ids"]
+        rewards: List[List[float]] = generator_output["rewards"]
+        loss_masks: List[List[int]] = generator_output["loss_masks"]
+        logprobs: Optional[List[List[float]]] = generator_output.get("rollout_logprobs", None)
+        rollout_expert_indices: Optional[List[List[List[List[int]]]]] = generator_output.get(
+            "rollout_expert_indices", None
+        )
+        trajectory_ids = generator_output.get("trajectory_ids", None)
+        is_last_step = generator_output.get("is_last_step", None)
+        step_metadata = list(generator_output.get("step_metadata", []) or [])
+
+        if not (self.uses_state_action_td and self.cfg.generator.step_wise_trajectories and step_metadata):
+            return (
+                prompt_ids,
+                response_ids,
+                rewards,
+                loss_masks,
+                logprobs,
+                rollout_expert_indices,
+                trajectory_ids,
+                is_last_step,
+                step_metadata,
+                uids,
+            )
+
+        expanded_prompt_ids: List[List[int]] = []
+        expanded_response_ids: List[List[int]] = []
+        expanded_rewards: List[List[float]] = []
+        expanded_loss_masks: List[List[int]] = []
+        expanded_logprobs: Optional[List[List[float]]] = [] if logprobs is not None else None
+        expanded_rollout_expert_indices: Optional[List[List[List[List[int]]]]] = (
+            [] if rollout_expert_indices is not None else None
+        )
+        expanded_trajectory_ids: Optional[List[Any]] = [] if trajectory_ids is not None else None
+        expanded_is_last_step: Optional[List[bool]] = [] if is_last_step is not None else None
+        expanded_step_metadata: List[Dict[str, Any]] = []
+        expanded_uids: List[str] = []
+
+        for idx in range(len(response_ids)):
+            metadata = copy.deepcopy(step_metadata[idx] or {})
+            bootstrap_prompt_ids = metadata.pop("bootstrap_prompt_ids", None)
+            metadata.setdefault("is_bootstrap_state", False)
+
+            expanded_prompt_ids.append(prompt_ids[idx])
+            expanded_response_ids.append(response_ids[idx])
+            expanded_rewards.append(rewards[idx])
+            expanded_loss_masks.append(loss_masks[idx])
+            if expanded_logprobs is not None:
+                expanded_logprobs.append(logprobs[idx])
+            if expanded_rollout_expert_indices is not None:
+                expanded_rollout_expert_indices.append(rollout_expert_indices[idx])
+            if expanded_trajectory_ids is not None:
+                expanded_trajectory_ids.append(trajectory_ids[idx])
+            if expanded_is_last_step is not None:
+                expanded_is_last_step.append(bool(is_last_step[idx]))
+            expanded_step_metadata.append(metadata)
+            expanded_uids.append(uids[idx])
+
+            if bootstrap_prompt_ids is None:
+                continue
+
+            bootstrap_metadata = {
+                "parsed_action": None,
+                "valid_action": False,
+                "success": False,
+                "steps": metadata.get("steps", 0),
+                "terminated": False,
+                "truncated": False,
+                "env_truncated": False,
+                "turn_limit_reached": False,
+                "is_bootstrap_state": True,
+                "bootstrap_from_truncated": True,
+            }
+
+            expanded_prompt_ids.append(list(bootstrap_prompt_ids))
+            expanded_response_ids.append([])
+            expanded_rewards.append([])
+            expanded_loss_masks.append([])
+            if expanded_logprobs is not None:
+                expanded_logprobs.append([])
+            if expanded_rollout_expert_indices is not None:
+                expanded_rollout_expert_indices.append([])
+            if expanded_trajectory_ids is not None:
+                expanded_trajectory_ids.append(trajectory_ids[idx])
+            if expanded_is_last_step is not None:
+                expanded_is_last_step.append(False)
+            expanded_step_metadata.append(bootstrap_metadata)
+            expanded_uids.append(uids[idx])
+
+        return (
+            expanded_prompt_ids,
+            expanded_response_ids,
+            expanded_rewards,
+            expanded_loss_masks,
+            expanded_logprobs,
+            expanded_rollout_expert_indices,
+            expanded_trajectory_ids,
+            expanded_is_last_step,
+            expanded_step_metadata,
+            expanded_uids,
+        )
+
     def _annotate_state_action_step_fields(self, training_input: TrainingInputBatch) -> TrainingInputBatch:
         if not self.uses_state_action_td:
             return training_input
@@ -217,31 +336,24 @@ class RayPPOTrainer:
         loss_mask = training_input["loss_mask"]
         response_mask = training_input["response_mask"]
         response_lengths = response_mask.sum(dim=-1).long()
-        has_response = response_lengths > 0
+        has_loss_tokens = loss_mask.sum(dim=-1) > 0
 
-        state_index = torch.where(
-            has_response,
-            total_seq_len - response_lengths - 1,
-            torch.zeros_like(response_lengths),
+        state_index = total_seq_len - response_lengths - 1
+        action_end_index = torch.where(
+            has_loss_tokens,
+            prompt_width + self._last_nonzero_index(loss_mask > 0),
+            state_index,
         )
-        action_end_index = prompt_width + self._last_nonzero_index(loss_mask > 0)
-        next_state_index = torch.where(
-            has_response,
-            torch.full_like(response_lengths, total_seq_len - 1),
-            torch.zeros_like(response_lengths),
-        )
+        next_state_index = torch.full_like(response_lengths, total_seq_len - 1)
         step_reward = training_input["rewards"].sum(dim=-1)
-        done = (
-            training_input["is_last_step"].to(dtype=torch.float32)
-            if training_input.get("is_last_step", None) is not None
-            else torch.zeros(training_input.batch_size, dtype=torch.float32)
-        )
-        bootstrap_mask = 1.0 - done
 
         parsed_action_ids = []
         action_valid = []
+        terminated = []
+        is_bootstrap_state = []
         for idx, metadata in enumerate(step_metadata):
             metadata = metadata or {}
+            metadata.setdefault("is_bootstrap_state", False)
             parsed_action = metadata.get("parsed_action")
             if isinstance(parsed_action, str):
                 parsed_action_ids.append(ACTION_MAP.get(parsed_action.lower(), -1))
@@ -251,6 +363,16 @@ class RayPPOTrainer:
                 action_valid.append(float(bool(metadata["valid_action"])))
             else:
                 action_valid.append(float(loss_mask[idx].sum().item() > 0))
+            if "terminated" in metadata:
+                terminated.append(float(bool(metadata["terminated"])))
+            elif training_input.get("is_last_step", None) is not None:
+                terminated.append(float(bool(training_input["is_last_step"][idx].item())))
+            else:
+                terminated.append(0.0)
+            is_bootstrap_state.append(float(bool(metadata["is_bootstrap_state"])))
+
+        done = torch.tensor(terminated, dtype=torch.float32)
+        bootstrap_mask = 1.0 - done
 
         training_input["state_index"] = state_index
         training_input["action_end_index"] = action_end_index
@@ -258,6 +380,7 @@ class RayPPOTrainer:
         training_input["step_reward"] = step_reward
         training_input["done"] = done
         training_input["bootstrap_mask"] = bootstrap_mask
+        training_input["is_bootstrap_state"] = torch.tensor(is_bootstrap_state, dtype=torch.bool)
         training_input["parsed_action_id"] = torch.tensor(parsed_action_ids, dtype=torch.long)
         training_input["action_valid"] = torch.tensor(action_valid, dtype=torch.float32)
         return training_input
@@ -273,17 +396,25 @@ class RayPPOTrainer:
         assert trajectory_ids is not None, "state_action_td requires trajectory_ids metadata"
 
         valid_step_mask = data["loss_mask"].sum(dim=-1) > 0
+        bootstrap_state_mask = data.get("is_bootstrap_state")
+        if bootstrap_state_mask is None:
+            bootstrap_state_mask = torch.zeros_like(valid_step_mask, dtype=torch.bool)
+        else:
+            bootstrap_state_mask = bootstrap_state_mask.bool()
+        source_mask = valid_step_mask | bootstrap_state_mask
         done = data.get("done")
         next_v_values = torch.zeros_like(v_values)
         compare_mask = torch.zeros_like(valid_step_mask, dtype=torch.bool)
 
         grouped_indices: Dict[str, List[int]] = defaultdict(list)
         for idx, trajectory_id in enumerate(trajectory_ids):
-            if valid_step_mask[idx]:
+            if source_mask[idx]:
                 grouped_indices[trajectory_id].append(idx)
 
         for indices in grouped_indices.values():
             for idx, next_idx in zip(indices[:-1], indices[1:]):
+                if not valid_step_mask[idx]:
+                    continue
                 if done is not None and bool(done[idx].item()):
                     continue
                 next_v_values[idx] = v_values[next_idx]
@@ -871,14 +1002,20 @@ class RayPPOTrainer:
 
     def convert_to_training_input(self, generator_output: GeneratorOutput, uids: List[str]) -> TrainingInputBatch:
         """Converts lists to a padded batch of tensors for training"""
-        prompt_ids: List[List[int]] = generator_output["prompt_token_ids"]
-        response_ids: List[List[int]] = generator_output["response_ids"]
-        rewards: List[List[float]] = generator_output["rewards"]
-        loss_masks: List[List[int]] = generator_output["loss_masks"]
-
-        logprobs: Optional[List[List[float]]] = generator_output.get("rollout_logprobs", None)
-        rollout_expert_indices: Optional[List[List[List[List[int]]]]] = generator_output.get(
-            "rollout_expert_indices", None
+        (
+            prompt_ids,
+            response_ids,
+            rewards,
+            loss_masks,
+            logprobs,
+            rollout_expert_indices,
+            trajectory_ids,
+            is_last_step,
+            step_metadata,
+            uids,
+        ) = self._expand_state_action_bootstrap_rows(
+            generator_output,
+            uids,
         )
 
         (
@@ -920,8 +1057,8 @@ class RayPPOTrainer:
                 "rollout_logprobs": rollout_logprobs_tensor,
                 "rollout_expert_indices": rollout_expert_indices_tensor,
                 "is_last_step": (
-                    torch.tensor(generator_output["is_last_step"], dtype=torch.bool)
-                    if generator_output.get("is_last_step", None) is not None
+                    torch.tensor(is_last_step, dtype=torch.bool)
+                    if is_last_step is not None
                     else None
                 ),
             },
@@ -938,17 +1075,16 @@ class RayPPOTrainer:
             }
         )
         if self.cfg.generator.step_wise_trajectories:
-            assert (
-                "trajectory_ids" in generator_output
-            ), "Expected `trajectory_ids` in generator output for step wise training"
+            assert trajectory_ids is not None, "Expected `trajectory_ids` in generator output for step wise training"
             training_input.metadata["trajectory_ids"] = [
-                trajectory_id.to_string() for trajectory_id in generator_output["trajectory_ids"]
+                trajectory_id.to_string() if hasattr(trajectory_id, "to_string") else str(trajectory_id)
+                for trajectory_id in trajectory_ids
             ]
-            training_input.metadata["step_metadata"] = list(generator_output.get("step_metadata", []) or [])
+            training_input.metadata["step_metadata"] = list(step_metadata or [])
         if self.cfg.generator.step_wise_trajectories:
             step_wise_summary = summarize_step_wise_trajectories(
-                responses=response_ids,
-                rewards=rewards,
+                responses=generator_output["response_ids"],
+                rewards=generator_output["rewards"],
                 trajectory_ids=generator_output["trajectory_ids"],
                 is_last_step=generator_output["is_last_step"],
             )
