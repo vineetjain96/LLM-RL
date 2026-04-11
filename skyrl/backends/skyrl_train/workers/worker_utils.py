@@ -129,6 +129,7 @@ class BatchIterator:
             next_v_values=batch.get("next_v_values"),
             q_targets=batch.get("q_targets"),
             v_targets=batch.get("v_targets"),
+            state_action_step_mask=batch.get("state_action_step_mask"),
             rollout_expert_indices=batch.get("rollout_expert_indices"),
             # additional info
             # can be used to log metrics etc for micro-batches in the worker

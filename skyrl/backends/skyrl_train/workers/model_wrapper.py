@@ -551,17 +551,29 @@ def _get_critic_model(
 
             if state_index is not None or action_end_index is not None or next_state_index is not None:
                 assert state_index is not None and action_end_index is not None
-                batch_indices = torch.arange(hidden_states_for_gather.size(0), device=hidden_states_for_gather.device)
-                state_repr = hidden_states_for_gather[batch_indices, state_index.long()]
-                action_repr = hidden_states_for_gather[batch_indices, action_end_index.long()]
+                if state_index.ndim == 1:
+                    batch_indices = torch.arange(hidden_states_for_gather.size(0), device=hidden_states_for_gather.device)
+                    state_repr = hidden_states_for_gather[batch_indices, state_index.long()]
+                    action_repr = hidden_states_for_gather[batch_indices, action_end_index.long()]
+                elif state_index.ndim == 2:
+                    batch_indices = torch.arange(hidden_states_for_gather.size(0), device=hidden_states_for_gather.device)
+                    batch_indices = batch_indices.unsqueeze(-1).expand_as(state_index)
+                    state_repr = hidden_states_for_gather[batch_indices, state_index.long()]
+                    action_repr = hidden_states_for_gather[batch_indices, action_end_index.long()]
+                else:
+                    raise ValueError(f"Expected state_index to have rank 1 or 2, got shape {tuple(state_index.shape)}")
 
                 critic_outputs = {
                     "v_values": getattr(self, self.value_head_prefix)(state_repr).squeeze(-1),
                     "q_values": getattr(self, self.q_head_prefix)(action_repr).squeeze(-1),
                 }
                 if next_state_index is not None:
-                    next_state_repr = hidden_states_for_gather[batch_indices, next_state_index.long()]
-                    critic_outputs["next_v_values"] = getattr(self, self.value_head_prefix)(next_state_repr).squeeze(-1)
+                    safe_next_state_index = next_state_index.long().clamp(min=0)
+                    next_state_repr = hidden_states_for_gather[batch_indices, safe_next_state_index]
+                    next_v_values = getattr(self, self.value_head_prefix)(next_state_repr).squeeze(-1)
+                    if (next_state_index < 0).any():
+                        next_v_values = torch.where(next_state_index >= 0, next_v_values, torch.zeros_like(next_v_values))
+                    critic_outputs["next_v_values"] = next_v_values
                 if return_output:
                     return critic_outputs, outputs
                 return critic_outputs

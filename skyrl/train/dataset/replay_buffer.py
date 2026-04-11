@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Union
 
 import torch
 import torch.nn.functional as F
-from jaxtyping import Float, Integer
+from jaxtyping import Bool, Float, Integer
 
 from skyrl.backends.skyrl_train.training_batch import TensorList
 
@@ -83,6 +83,7 @@ class Experience:
     rollout_expert_indices: Optional[Integer[torch.Tensor, "batch seq_len layer_num topk"]]
     num_actions: int
     info: Optional[dict]
+    state_action_step_mask: Optional[Bool[torch.Tensor, "batch max_steps"]] = None
     kl: Optional[Float[torch.Tensor, "batch response_len"]] = None
     metadata: Optional[Dict[str, Any]] = None
     pixel_values: Optional[TensorList] = None
@@ -137,6 +138,8 @@ class Experience:
             self.v_targets = to(self.v_targets, device)
         if self.rollout_expert_indices is not None:
             self.rollout_expert_indices = to(self.rollout_expert_indices, device)
+        if self.state_action_step_mask is not None:
+            self.state_action_step_mask = to(self.state_action_step_mask, device)
         if self.pixel_values is not None:
             self.pixel_values = self.pixel_values.to(device)
         if self.image_grid_thw is not None:
@@ -190,6 +193,8 @@ class Experience:
             self.v_targets = self.v_targets.pin_memory()
         if self.rollout_expert_indices is not None:
             self.rollout_expert_indices = self.rollout_expert_indices.pin_memory()
+        if self.state_action_step_mask is not None:
+            self.state_action_step_mask = self.state_action_step_mask.pin_memory()
         return self
 
 

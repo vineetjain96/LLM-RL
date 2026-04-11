@@ -52,6 +52,7 @@ from skyrl.train.generators.base import (
     GeneratorInput,
     GeneratorInterface,
     GeneratorOutput,
+    StateActionTrajectoryMetadata,
 )
 from skyrl.train.generators.utils import (
     get_metrics_from_generator_output,
@@ -81,6 +82,9 @@ from skyrl.train.utils.trainer_utils import (
     zero_variance_filter,
 )
 from skyrl.train.utils.utils import ResolvedPlacementGroup, configure_ray_worker_logging
+
+_STATE_ACTION_LOSS_SPANS_METADATA_KEY = "_state_action_loss_spans"
+_STATE_ACTION_BOOTSTRAP_PROMPTS_METADATA_KEY = "_state_action_bootstrap_prompts"
 
 
 class RayPPOTrainer:
@@ -139,6 +143,14 @@ class RayPPOTrainer:
     @property
     def uses_state_action_td(self) -> bool:
         return self.cfg.trainer.algorithm.advantage_estimator == "state_action_td"
+
+    @property
+    def uses_step_wise_state_action_td(self) -> bool:
+        return self.uses_state_action_td and self.cfg.generator.step_wise_trajectories
+
+    @property
+    def uses_trajectory_state_action_td(self) -> bool:
+        return self.uses_state_action_td and not self.cfg.generator.step_wise_trajectories
 
     def _get_state_action_mini_batch_updates(self, model: str) -> Optional[int]:
         if not self.uses_state_action_td:
@@ -213,6 +225,7 @@ class RayPPOTrainer:
         Optional[List[Any]],
         Optional[List[bool]],
         Optional[List[Dict[str, Any]]],
+        Optional[List[StateActionTrajectoryMetadata]],
         List[str],
     ]:
         prompt_ids: List[List[int]] = generator_output["prompt_token_ids"]
@@ -226,8 +239,9 @@ class RayPPOTrainer:
         trajectory_ids = generator_output.get("trajectory_ids", None)
         is_last_step = generator_output.get("is_last_step", None)
         step_metadata = list(generator_output.get("step_metadata", []) or [])
+        state_action_metadata = generator_output.get("state_action_metadata", None)
 
-        if not (self.uses_state_action_td and self.cfg.generator.step_wise_trajectories and step_metadata):
+        if not (self.uses_step_wise_state_action_td and step_metadata):
             return (
                 prompt_ids,
                 response_ids,
@@ -238,6 +252,7 @@ class RayPPOTrainer:
                 trajectory_ids,
                 is_last_step,
                 step_metadata,
+                state_action_metadata,
                 uids,
             )
 
@@ -315,12 +330,16 @@ class RayPPOTrainer:
             expanded_trajectory_ids,
             expanded_is_last_step,
             expanded_step_metadata,
+            state_action_metadata,
             expanded_uids,
         )
 
     def _annotate_state_action_step_fields(self, training_input: TrainingInputBatch) -> TrainingInputBatch:
         if not self.uses_state_action_td:
             return training_input
+        if self.uses_trajectory_state_action_td:
+            return self._annotate_trajectory_state_action_fields(training_input)
+
         assert self.cfg.generator.step_wise_trajectories, "state_action_td requires step-wise trajectories"
 
         from skyrl_gym.envs.babyai_text.utils import ACTION_MAP
@@ -354,21 +373,21 @@ class RayPPOTrainer:
         for idx, metadata in enumerate(step_metadata):
             metadata = metadata or {}
             metadata.setdefault("is_bootstrap_state", False)
-            parsed_action = metadata.get("parsed_action")
-            if isinstance(parsed_action, str):
-                parsed_action_ids.append(ACTION_MAP.get(parsed_action.lower(), -1))
-            else:
-                parsed_action_ids.append(-1)
-            if "valid_action" in metadata:
-                action_valid.append(float(bool(metadata["valid_action"])))
-            else:
-                action_valid.append(float(loss_mask[idx].sum().item() > 0))
-            if "terminated" in metadata:
-                terminated.append(float(bool(metadata["terminated"])))
-            elif training_input.get("is_last_step", None) is not None:
-                terminated.append(float(bool(training_input["is_last_step"][idx].item())))
-            else:
-                terminated.append(0.0)
+            parsed_action_id, valid_action_value, terminated_value = self._resolve_state_action_step_fields(
+                parsed_action=metadata.get("parsed_action"),
+                valid_action=metadata.get("valid_action"),
+                terminated=metadata.get("terminated"),
+                default_valid_action=bool(loss_mask[idx].sum().item() > 0),
+                default_terminated=(
+                    bool(training_input["is_last_step"][idx].item())
+                    if training_input.get("is_last_step", None) is not None
+                    else False
+                ),
+                action_map=ACTION_MAP,
+            )
+            parsed_action_ids.append(parsed_action_id)
+            action_valid.append(valid_action_value)
+            terminated.append(terminated_value)
             is_bootstrap_state.append(float(bool(metadata["is_bootstrap_state"])))
 
         done = torch.tensor(terminated, dtype=torch.float32)
@@ -385,12 +404,279 @@ class RayPPOTrainer:
         training_input["action_valid"] = torch.tensor(action_valid, dtype=torch.float32)
         return training_input
 
+    def _annotate_trajectory_state_action_fields(self, training_input: TrainingInputBatch) -> TrainingInputBatch:
+        from skyrl_gym.envs.babyai_text.utils import ACTION_MAP
+
+        state_action_metadata = list(training_input.metadata.get("state_action_metadata", []) or [])
+        assert state_action_metadata, "Trajectory state_action_td requires state_action_metadata"
+        assert len(state_action_metadata) == training_input.batch_size, (
+            f"Expected {training_input.batch_size} trajectory state_action metadata entries, "
+            f"got {len(state_action_metadata)}"
+        )
+
+        batch_size = training_input.batch_size
+        response_len = training_input["response_mask"].shape[1]
+        total_seq_len = training_input["sequences"].shape[1]
+        attention_mask = training_input["attention_mask"]
+        response_mask = training_input["response_mask"]
+        response_lengths = response_mask.sum(dim=-1).long()
+        total_lengths = attention_mask.sum(dim=-1).long()
+        left_pad = total_seq_len - total_lengths
+        response_pad = response_len - response_lengths
+
+        max_steps = max(len((metadata or {}).get("state_index", [])) for metadata in state_action_metadata)
+        state_action_step_mask = torch.zeros((batch_size, max_steps), dtype=torch.bool)
+        state_index = torch.zeros((batch_size, max_steps), dtype=torch.long)
+        action_end_index = torch.zeros((batch_size, max_steps), dtype=torch.long)
+        next_state_index = torch.full((batch_size, max_steps), -1, dtype=torch.long)
+        step_reward = torch.zeros((batch_size, max_steps), dtype=torch.float32)
+        done = torch.zeros((batch_size, max_steps), dtype=torch.float32)
+        parsed_action_id = torch.full((batch_size, max_steps), -1, dtype=torch.long)
+        action_valid = torch.zeros((batch_size, max_steps), dtype=torch.float32)
+        is_bootstrap_state = torch.zeros((batch_size, max_steps), dtype=torch.bool)
+
+        padded_loss_spans: List[List[Tuple[int, int]]] = []
+        bootstrap_prompts: List[Dict[str, Any]] = []
+
+        for row_idx, metadata in enumerate(state_action_metadata):
+            pad_seq = int(left_pad[row_idx].item())
+            pad_resp = int(response_pad[row_idx].item())
+            row_annotations = self._build_trajectory_state_action_row_annotations(
+                metadata=metadata,
+                row_idx=row_idx,
+                pad_seq=pad_seq,
+                pad_resp=pad_resp,
+                action_map=ACTION_MAP,
+            )
+
+            if row_annotations["num_steps"] == 0:
+                padded_loss_spans.append([])
+                continue
+
+            num_steps = row_annotations["num_steps"]
+            state_action_step_mask[row_idx, :num_steps] = True
+            state_index[row_idx, :num_steps] = torch.tensor(row_annotations["state_index"], dtype=torch.long)
+            action_end_index[row_idx, :num_steps] = torch.tensor(row_annotations["action_end_index"], dtype=torch.long)
+            next_state_index[row_idx, :num_steps] = torch.tensor(row_annotations["next_state_index"], dtype=torch.long)
+            step_reward[row_idx, :num_steps] = torch.tensor(row_annotations["step_reward"], dtype=torch.float32)
+            done[row_idx, :num_steps] = torch.tensor(row_annotations["done"], dtype=torch.float32)
+            action_valid[row_idx, :num_steps] = torch.tensor(row_annotations["action_valid"], dtype=torch.float32)
+            parsed_action_id[row_idx, :num_steps] = torch.tensor(
+                row_annotations["parsed_action_id"], dtype=torch.long
+            )
+            padded_loss_spans.append(row_annotations["loss_spans"])
+            bootstrap_prompts.extend(row_annotations["bootstrap_prompts"])
+
+        training_input["state_action_step_mask"] = state_action_step_mask
+        training_input["state_index"] = state_index
+        training_input["action_end_index"] = action_end_index
+        training_input["next_state_index"] = next_state_index
+        training_input["step_reward"] = step_reward
+        training_input["done"] = done
+        training_input["bootstrap_mask"] = state_action_step_mask.float() * (1.0 - done)
+        training_input["is_bootstrap_state"] = is_bootstrap_state
+        training_input["parsed_action_id"] = parsed_action_id
+        training_input["action_valid"] = action_valid
+        self._set_trajectory_state_action_aux_metadata(
+            training_input,
+            loss_spans=padded_loss_spans,
+            bootstrap_prompts=bootstrap_prompts,
+        )
+        return training_input
+
+    @staticmethod
+    def _resolve_state_action_step_fields(
+        *,
+        parsed_action: Any,
+        valid_action: Optional[Any],
+        terminated: Optional[Any],
+        default_valid_action: bool,
+        default_terminated: bool,
+        action_map: Dict[str, int],
+    ) -> Tuple[int, float, float]:
+        parsed_action_id = action_map.get(parsed_action.lower(), -1) if isinstance(parsed_action, str) else -1
+        valid_action_value = (
+            float(bool(valid_action)) if valid_action is not None else float(default_valid_action)
+        )
+        terminated_value = (
+            float(bool(terminated)) if terminated is not None else float(default_terminated)
+        )
+        return parsed_action_id, valid_action_value, terminated_value
+
+    def _build_trajectory_state_action_row_annotations(
+        self,
+        *,
+        metadata: Optional[StateActionTrajectoryMetadata],
+        row_idx: int,
+        pad_seq: int,
+        pad_resp: int,
+        action_map: Dict[str, int],
+    ) -> Dict[str, Any]:
+        metadata = metadata or {}
+        raw_state_index = list(metadata.get("state_index", []))
+        raw_action_end_index = list(metadata.get("action_end_index", []))
+        raw_next_state_index = list(metadata.get("next_state_index", []))
+        raw_loss_span_start = list(metadata.get("loss_span_start", []))
+        raw_loss_span_end = list(metadata.get("loss_span_end", []))
+        raw_step_reward = list(metadata.get("step_reward", []))
+        raw_terminated = list(metadata.get("terminated", []))
+        raw_valid_action = list(metadata.get("valid_action", []))
+        raw_parsed_action = list(metadata.get("parsed_action", []))
+        raw_bootstrap_prompt_ids = list(metadata.get("bootstrap_prompt_ids", []))
+        num_steps = len(raw_state_index)
+
+        row_done = []
+        row_action_valid = []
+        row_parsed_action_id = []
+        row_loss_spans: List[Tuple[int, int]] = []
+        row_bootstrap_prompts: List[Dict[str, Any]] = []
+
+        for step_idx in range(num_steps):
+            parsed_action_id, valid_action_value, terminated_value = self._resolve_state_action_step_fields(
+                parsed_action=raw_parsed_action[step_idx] if step_idx < len(raw_parsed_action) else None,
+                valid_action=raw_valid_action[step_idx] if step_idx < len(raw_valid_action) else None,
+                terminated=raw_terminated[step_idx] if step_idx < len(raw_terminated) else None,
+                default_valid_action=False,
+                default_terminated=False,
+                action_map=action_map,
+            )
+            row_parsed_action_id.append(parsed_action_id)
+            row_action_valid.append(valid_action_value)
+            row_done.append(terminated_value)
+
+            if step_idx < len(raw_loss_span_start) and step_idx < len(raw_loss_span_end):
+                row_loss_spans.append(
+                    (pad_resp + int(raw_loss_span_start[step_idx]), pad_resp + int(raw_loss_span_end[step_idx]))
+                )
+            bootstrap_prompt_ids = raw_bootstrap_prompt_ids[step_idx] if step_idx < len(raw_bootstrap_prompt_ids) else None
+            if bootstrap_prompt_ids is not None:
+                row_bootstrap_prompts.append(
+                    {
+                        "row_idx": row_idx,
+                        "step_idx": step_idx,
+                        "prompt_ids": list(bootstrap_prompt_ids),
+                    }
+                )
+
+        return {
+            "num_steps": num_steps,
+            "state_index": [pad_seq + int(idx) for idx in raw_state_index],
+            "action_end_index": [pad_seq + int(idx) for idx in raw_action_end_index],
+            "next_state_index": [pad_seq + int(idx) if idx is not None else -1 for idx in raw_next_state_index],
+            "step_reward": [float(reward) for reward in raw_step_reward],
+            "done": row_done,
+            "action_valid": row_action_valid,
+            "parsed_action_id": row_parsed_action_id,
+            "loss_spans": row_loss_spans,
+            "bootstrap_prompts": row_bootstrap_prompts,
+        }
+
+    @staticmethod
+    def _set_trajectory_state_action_aux_metadata(
+        training_input: TrainingInputBatch,
+        *,
+        loss_spans: List[List[Tuple[int, int]]],
+        bootstrap_prompts: List[Dict[str, Any]],
+    ) -> None:
+        training_input.metadata[_STATE_ACTION_LOSS_SPANS_METADATA_KEY] = loss_spans
+        training_input.metadata[_STATE_ACTION_BOOTSTRAP_PROMPTS_METADATA_KEY] = bootstrap_prompts
+
+    @staticmethod
+    def _get_trajectory_state_action_loss_spans(data: TrainingInputBatch) -> List[List[Tuple[int, int]]]:
+        return data.metadata.get(_STATE_ACTION_LOSS_SPANS_METADATA_KEY, [])
+
+    @staticmethod
+    def _pop_trajectory_state_action_bootstrap_prompts(
+        training_input: TrainingInputBatch,
+    ) -> List[Dict[str, Any]]:
+        return training_input.metadata.pop(_STATE_ACTION_BOOTSTRAP_PROMPTS_METADATA_KEY, [])
+
+    def _get_state_action_valid_step_mask(self, data: TrainingInputBatch) -> torch.Tensor:
+        step_mask = data.get("state_action_step_mask")
+        if step_mask is not None:
+            return step_mask.bool()
+        return data["loss_mask"].sum(dim=-1) > 0
+
+    def _scatter_state_action_step_values_to_loss_tokens(
+        self,
+        data: TrainingInputBatch,
+        step_values: torch.Tensor,
+    ) -> torch.Tensor:
+        if step_values.ndim == 1:
+            return step_values.unsqueeze(-1) * data["loss_mask"]
+
+        token_values = torch.zeros_like(data["loss_mask"], dtype=step_values.dtype)
+        spans_by_row = self._get_trajectory_state_action_loss_spans(data)
+        state_action_step_mask = data.get("state_action_step_mask")
+        assert state_action_step_mask is not None, "Trajectory state_action_td expects state_action_step_mask"
+        assert len(spans_by_row) == len(token_values), (
+            f"Expected {len(token_values)} state_action span entries, got {len(spans_by_row)}"
+        )
+
+        for row_idx, spans in enumerate(spans_by_row):
+            for step_idx, (span_start, span_end) in enumerate(spans):
+                if not bool(state_action_step_mask[row_idx, step_idx].item()):
+                    continue
+                token_values[row_idx, span_start:span_end] = step_values[row_idx, step_idx]
+
+        return token_values * data["loss_mask"]
+
+    def _build_prompt_only_batch(self, prompt_ids: List[List[int]]) -> TrainingInputBatch:
+        assert len(prompt_ids) > 0, "Expected at least one prompt for prompt-only critic forward"
+        pad_token_id = self.tokenizer.pad_token_id
+        max_prompt_len = max(len(ids) for ids in prompt_ids)
+        sequences = []
+        attention_masks = []
+        state_index = []
+        for ids in prompt_ids:
+            pad_len = max_prompt_len - len(ids)
+            sequences.append([pad_token_id] * pad_len + list(ids))
+            attention_masks.append([0] * pad_len + [1] * len(ids))
+            state_index.append(max_prompt_len - 1)
+
+        batch = TrainingInputBatch(
+            {
+                "sequences": torch.tensor(sequences, dtype=torch.long),
+                "attention_mask": torch.tensor(attention_masks, dtype=torch.long),
+                "state_index": torch.tensor(state_index, dtype=torch.long),
+                "action_end_index": torch.tensor(state_index, dtype=torch.long),
+            }
+        )
+        batch.metadata = {
+            "uids": [f"bootstrap_{idx}" for idx in range(len(prompt_ids))],
+            "response_length": 0,
+        }
+
+        dp_multiple = self.dispatch.get_lcm_dp_size()
+        pad_size = math.ceil(len(batch) / dp_multiple) * dp_multiple - len(batch)
+        if pad_size == 0:
+            return batch
+
+        pad_sequences = batch["sequences"].index_select(0, torch.arange(pad_size) % len(batch)).clone()
+        pad_attention_mask = batch["attention_mask"].index_select(0, torch.arange(pad_size) % len(batch)).clone()
+        pad_state_index = batch["state_index"].index_select(0, torch.arange(pad_size) % len(batch)).clone()
+        batch = TrainingInputBatch(
+            {
+                "sequences": torch.cat([batch["sequences"], pad_sequences], dim=0),
+                "attention_mask": torch.cat([batch["attention_mask"], pad_attention_mask], dim=0),
+                "state_index": torch.cat([batch["state_index"], pad_state_index], dim=0),
+                "action_end_index": torch.cat([batch["action_end_index"], pad_state_index], dim=0),
+            }
+        )
+        batch.metadata = {
+            "uids": [f"bootstrap_{idx}" for idx in range(len(batch))],
+            "response_length": 0,
+        }
+        return batch
+
     @torch.no_grad()
     def _compute_state_action_shifted_next_v_values(
         self, v_values: torch.Tensor, data: TrainingInputBatch
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Align V(s_{t+1}) with the next step's prompt-state representation."""
-        assert self.uses_state_action_td, "shifted next-step values are only defined for state_action_td"
+        assert self.uses_step_wise_state_action_td, (
+            "shifted next-step values are only defined for step-wise state_action_td"
+        )
 
         trajectory_ids = data.metadata.get("trajectory_ids")
         assert trajectory_ids is not None, "state_action_td requires trajectory_ids metadata"
@@ -441,23 +727,41 @@ class RayPPOTrainer:
 
         v_targets = torch.zeros_like(v_values)
         value_advantages = torch.zeros_like(v_values)
-        valid_step_mask = data["loss_mask"].sum(dim=-1) > 0
-        trajectory_ids = data.metadata.get("trajectory_ids")
-        assert trajectory_ids is not None, "state_action_td requires trajectory_ids metadata"
+        valid_step_mask = self._get_state_action_valid_step_mask(data)
 
-        grouped_indices: Dict[str, List[int]] = defaultdict(list)
-        for idx, trajectory_id in enumerate(trajectory_ids):
-            if valid_step_mask[idx]:
-                grouped_indices[trajectory_id].append(idx)
+        if valid_step_mask.ndim == 1:
+            trajectory_ids = data.metadata.get("trajectory_ids")
+            assert trajectory_ids is not None, "state_action_td requires trajectory_ids metadata"
 
-        for indices in grouped_indices.values():
-            last_gae = torch.tensor(0.0, device=v_values.device, dtype=v_values.dtype)
-            for idx in reversed(indices):
-                not_done = 1.0 - done[idx]
-                delta = step_reward[idx] + gamma * next_v_values[idx] * not_done - v_values[idx]
-                last_gae = delta + gamma * lambd * not_done * last_gae
-                value_advantages[idx] = last_gae
-                v_targets[idx] = v_values[idx] + last_gae
+            grouped_indices: Dict[str, List[int]] = defaultdict(list)
+            for idx, trajectory_id in enumerate(trajectory_ids):
+                if valid_step_mask[idx]:
+                    grouped_indices[trajectory_id].append(idx)
+
+            for indices in grouped_indices.values():
+                last_gae = torch.tensor(0.0, device=v_values.device, dtype=v_values.dtype)
+                for idx in reversed(indices):
+                    not_done = 1.0 - done[idx]
+                    delta = step_reward[idx] + gamma * next_v_values[idx] * not_done - v_values[idx]
+                    last_gae = delta + gamma * lambd * not_done * last_gae
+                    value_advantages[idx] = last_gae
+                    v_targets[idx] = v_values[idx] + last_gae
+        else:
+            q_targets = torch.where(valid_step_mask, q_targets, torch.zeros_like(q_targets))
+            for row_idx in range(v_values.shape[0]):
+                indices = torch.nonzero(valid_step_mask[row_idx], as_tuple=False).flatten().tolist()
+                last_gae = torch.tensor(0.0, device=v_values.device, dtype=v_values.dtype)
+                for idx in reversed(indices):
+                    not_done = 1.0 - done[row_idx, idx]
+                    delta = (
+                        step_reward[row_idx, idx]
+                        + gamma * next_v_values[row_idx, idx] * not_done
+                        - v_values[row_idx, idx]
+                    )
+                    last_gae = delta + gamma * lambd * not_done * last_gae
+                    value_advantages[row_idx, idx] = last_gae
+                    v_targets[row_idx, idx] = v_values[row_idx, idx] + last_gae
+            v_targets = torch.where(valid_step_mask, v_targets, torch.zeros_like(v_targets))
 
         actor_advantage_type = self.cfg.trainer.algorithm.state_action.actor_advantage_type
         if actor_advantage_type == "q_minus_v":
@@ -479,14 +783,16 @@ class RayPPOTrainer:
                 torch.zeros_like(actor_advantages),
             )
 
-        advantages = actor_advantages.unsqueeze(-1) * data["loss_mask"]
-        returns = v_targets.unsqueeze(-1) * data["loss_mask"]
+        advantages = self._scatter_state_action_step_values_to_loss_tokens(data, actor_advantages)
+        returns = self._scatter_state_action_step_values_to_loss_tokens(data, v_targets)
         return advantages, returns, q_targets, v_targets
 
     @torch.no_grad()
     def _collect_state_action_next_v_mismatch_metrics(self, data: TrainingInputBatch) -> Dict[str, float]:
         """Measure how much the current-step bootstrap differs from the next step's prompt-state value."""
         if not self.uses_state_action_td:
+            return {}
+        if self.uses_trajectory_state_action_td:
             return {}
         if not self.cfg.trainer.algorithm.state_action.analyze_next_v_mismatch:
             return {}
@@ -1012,6 +1318,7 @@ class RayPPOTrainer:
             trajectory_ids,
             is_last_step,
             step_metadata,
+            state_action_metadata,
             uids,
         ) = self._expand_state_action_bootstrap_rows(
             generator_output,
@@ -1081,6 +1388,11 @@ class RayPPOTrainer:
                 for trajectory_id in trajectory_ids
             ]
             training_input.metadata["step_metadata"] = list(step_metadata or [])
+        elif self.uses_trajectory_state_action_td:
+            assert state_action_metadata is not None, (
+                "Trajectory state_action_td expects `state_action_metadata` in generator output"
+            )
+            training_input.metadata["state_action_metadata"] = list(state_action_metadata)
         if self.cfg.generator.step_wise_trajectories:
             step_wise_summary = summarize_step_wise_trajectories(
                 responses=generator_output["response_ids"],
@@ -1313,7 +1625,11 @@ class RayPPOTrainer:
         )
 
         if self.uses_state_action_td:
-            valid_steps = data["loss_mask"][: num_samples - pad_size].sum(dim=-1) > 0
+            state_action_step_mask = data.get("state_action_step_mask")
+            if state_action_step_mask is not None:
+                valid_steps = state_action_step_mask[: num_samples - pad_size].bool()
+            else:
+                valid_steps = data["loss_mask"][: num_samples - pad_size].sum(dim=-1) > 0
             if valid_steps.any():
                 invalid_action_rate = 1.0 - data["action_valid"][: num_samples - pad_size][valid_steps].mean().item()
                 data.metadata["metrics"].update(
@@ -1416,8 +1732,14 @@ class RayPPOTrainer:
                 {"parsed_action": None, "valid_action": False, "success": False, "steps": 0}
                 for _ in range(pad_size)
             ]
+        if "state_action_metadata" in training_input.metadata:
+            state_action_metadata = list(training_input.metadata["state_action_metadata"])
+            state_action_metadata.extend(
+                copy.deepcopy(state_action_metadata[i % len(state_action_metadata)]) for i in range(pad_size)
+            )
+            new_training_input.metadata["state_action_metadata"] = state_action_metadata
         for key, value in training_input.metadata.items():
-            if key not in ["uids", "trajectory_ids", "step_metadata"]:
+            if key not in ["uids", "trajectory_ids", "step_metadata", "state_action_metadata"]:
                 new_training_input.metadata[key] = copy.deepcopy(value)
         return new_training_input
 
@@ -1448,7 +1770,7 @@ class RayPPOTrainer:
         critic_fwd_pass = data_fwd_pass
         if self.uses_state_action_td:
             critic_fwd_keys = ["sequences", "attention_mask", "state_index", "action_end_index"]
-            if self.cfg.trainer.algorithm.state_action.analyze_next_v_mismatch:
+            if self.uses_trajectory_state_action_td or self.cfg.trainer.algorithm.state_action.analyze_next_v_mismatch:
                 critic_fwd_keys.append("next_state_index")
             critic_fwd_pass = training_input.select(keys=critic_fwd_keys)
 
@@ -1456,7 +1778,7 @@ class RayPPOTrainer:
         q_values = None
         v_values = None
         next_v_values = None
-        bootstrap_next_v_values = None
+        critic_next_v_values = None
         base_log_probs = None
         action_log_probs = None
 
@@ -1466,7 +1788,7 @@ class RayPPOTrainer:
             if self.uses_state_action_td:
                 q_values = critic_output["q_values"]
                 v_values = critic_output["v_values"]
-                bootstrap_next_v_values = critic_output.get("next_v_values")
+                critic_next_v_values = critic_output.get("next_v_values")
             else:
                 values = critic_output["output"]
 
@@ -1490,9 +1812,7 @@ class RayPPOTrainer:
         values = values[: len(sequences_all)] if values is not None else None
         q_values = q_values[: len(sequences_all)] if q_values is not None else None
         v_values = v_values[: len(sequences_all)] if v_values is not None else None
-        bootstrap_next_v_values = (
-            bootstrap_next_v_values[: len(sequences_all)] if bootstrap_next_v_values is not None else None
-        )
+        critic_next_v_values = critic_next_v_values[: len(sequences_all)] if critic_next_v_values is not None else None
 
         training_input["base_action_log_probs"] = base_log_probs
         training_input["action_log_probs"] = action_log_probs
@@ -1501,10 +1821,30 @@ class RayPPOTrainer:
             assert v_values is not None, "state_action_td requires critic v_values"
             training_input["q_values"] = q_values
             training_input["v_values"] = v_values
-            next_v_values, _ = self._compute_state_action_shifted_next_v_values(v_values, training_input)
-            training_input["next_v_values"] = next_v_values
-            if bootstrap_next_v_values is not None:
-                training_input["bootstrap_next_v_values"] = bootstrap_next_v_values
+            if self.uses_step_wise_state_action_td:
+                next_v_values, _ = self._compute_state_action_shifted_next_v_values(v_values, training_input)
+                training_input["next_v_values"] = next_v_values
+            else:
+                assert critic_next_v_values is not None, (
+                    "Trajectory state_action_td requires same-row next_v_values from the critic forward"
+                )
+                next_v_values = critic_next_v_values
+                next_state_index = training_input.get("next_state_index")
+                if next_state_index is not None:
+                    next_v_values = torch.where(next_state_index >= 0, next_v_values, torch.zeros_like(next_v_values))
+
+                bootstrap_prompts = self._pop_trajectory_state_action_bootstrap_prompts(training_input)
+                if bootstrap_prompts:
+                    bootstrap_prompt_ids = [entry["prompt_ids"] for entry in bootstrap_prompts]
+                    bootstrap_batch = self._build_prompt_only_batch(bootstrap_prompt_ids)
+                    bootstrap_output = self.dispatch.forward("critic", bootstrap_batch)
+                    bootstrap_values = bootstrap_output["v_values"][: len(bootstrap_prompts)]
+                    for bootstrap_entry, bootstrap_value in zip(bootstrap_prompts, bootstrap_values):
+                        next_v_values[bootstrap_entry["row_idx"], bootstrap_entry["step_idx"]] = bootstrap_value
+
+                training_input["next_v_values"] = next_v_values
+            if critic_next_v_values is not None and self.uses_step_wise_state_action_td:
+                training_input["bootstrap_next_v_values"] = critic_next_v_values
 
         if training_input.get("rollout_logprobs", None) is not None:
             # calculates the difference in probs between inference and trainer components
@@ -1584,13 +1924,13 @@ class RayPPOTrainer:
     @torch.no_grad()
     def _normalize_advantages(self, data: TrainingInputBatch, mini_batch_size: int) -> TrainingInputBatch:
         advantages = data["advantages"]
-        response_mask = data["response_mask"]
+        advantage_mask = data["loss_mask"] if self.uses_state_action_td else data["response_mask"]
 
         # Step 1: Z-score normalization (if enabled)
         if self.cfg.trainer.algorithm.advantage_batch_normalize:
-            num_actions = response_mask.sum()
+            num_actions = advantage_mask.sum()
             mean = advantages.mean()
-            std = ((advantages - mean).pow(2) * response_mask).sum()
+            std = ((advantages - mean).pow(2) * advantage_mask).sum()
             rstd = (std / num_actions).clamp(min=1e-8).rsqrt()
             data["advantages"] = (advantages - mean) * rstd
 

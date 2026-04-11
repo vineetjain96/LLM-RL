@@ -3,11 +3,13 @@ uv  run --isolated --extra dev pytest tests/train/test_trainer.py
 """
 
 import os
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
 import torch
+import torch.nn as nn
 from jaxtyping import Float, Integer
 from pytest import approx
 
@@ -246,12 +248,12 @@ def test_pad_batch_pads_to_mini_batch_multiple(dummy_config):
 
     padded = trainer.pad_batch(training_input)
 
-    assert len(padded["sequences"]) == 8
-    assert padded.metadata["pad_size"] == 5
-    assert torch.equal(padded["loss_mask"][3:], torch.zeros(5, 2, dtype=torch.float32))
-    assert torch.equal(padded["is_last_step"][3:], torch.ones(5, dtype=torch.bool))
-    assert padded.metadata["uids"][-5:] == ["pad0", "pad1", "pad2", "pad3", "pad4"]
-    assert padded.metadata["trajectory_ids"][-5:] == ["pad0", "pad1", "pad2", "pad3", "pad4"]
+    assert len(padded["sequences"]) == 4
+    assert padded.metadata["pad_size"] == 1
+    assert torch.equal(padded["loss_mask"][3:], torch.zeros(1, 2, dtype=torch.float32))
+    assert torch.equal(padded["is_last_step"][3:], torch.ones(1, dtype=torch.bool))
+    assert padded.metadata["uids"][-1:] == ["pad0"]
+    assert padded.metadata["trajectory_ids"][-1:] == ["pad0"]
 
 
 def test_state_action_td_custom_critic_epochs_use_full_batch(dummy_config, dummy_generator):
@@ -705,8 +707,9 @@ def test_forward_backward_batch_calculations():
 
         return worker
 
-    # Test PolicyWorkerBase
-    policy_worker = create_test_worker(PolicyWorkerBase)
+    # Test PolicyWorkerBase without triggering registry sync to Ray actors.
+    with patch("skyrl.backends.skyrl_train.workers.worker.PolicyLossRegistry.get", return_value=MagicMock()):
+        policy_worker = create_test_worker(PolicyWorkerBase)
 
     # Mock _forward_backward_micro to track calls
     policy_forward_backward_micro_calls = []
@@ -1153,7 +1156,15 @@ def test_validate_cfg_state_action_td_preserves_policy_loss_config(dummy_config)
     cfg.generator.max_input_length = cfg.trainer.max_prompt_length
     cfg.environment.env_class = "babyai_text"
 
-    with patch("skyrl.train.utils.utils.validate_batch_sizes"):
+    with (
+        patch("skyrl.train.utils.utils.validate_batch_sizes"),
+        patch("skyrl.backends.skyrl_train.utils.ppo_utils.repopulate_all_registries"),
+        patch("skyrl.backends.skyrl_train.utils.ppo_utils.PolicyLossRegistry.list_available", return_value=["regular"]),
+        patch(
+            "skyrl.backends.skyrl_train.utils.ppo_utils.AdvantageEstimatorRegistry.list_available",
+            return_value=["state_action_td"],
+        ),
+    ):
         validate_cfg(cfg)
 
     assert cfg.trainer.algorithm.policy_loss_type == "regular"
@@ -1177,8 +1188,319 @@ def test_validate_cfg_state_action_td_allows_combined_update_controls(dummy_conf
     cfg.trainer.algorithm.state_action.critic_mini_batch_updates = 1
     cfg.trainer.algorithm.state_action.critic_epochs_per_batch = 4
 
-    with patch("skyrl.train.utils.utils.validate_batch_sizes"):
+    with (
+        patch("skyrl.train.utils.utils.validate_batch_sizes"),
+        patch("skyrl.backends.skyrl_train.utils.ppo_utils.repopulate_all_registries"),
+        patch("skyrl.backends.skyrl_train.utils.ppo_utils.PolicyLossRegistry.list_available", return_value=["regular"]),
+        patch(
+            "skyrl.backends.skyrl_train.utils.ppo_utils.AdvantageEstimatorRegistry.list_available",
+            return_value=["state_action_td"],
+        ),
+    ):
         validate_cfg(cfg)
+
+
+def test_validate_cfg_state_action_td_allows_trajectory_mode(dummy_config):
+    cfg = dummy_config
+    cfg.trainer.algorithm.advantage_estimator = "state_action_td"
+    cfg.trainer.algorithm.use_kl_loss = False
+    cfg.trainer.algorithm.use_kl_in_reward = False
+    cfg.trainer.critic.model.path = "dummy-critic"
+    cfg.trainer.strategy = "fsdp2"
+    cfg.generator.async_engine = True
+    cfg.generator.batched = False
+    cfg.generator.step_wise_trajectories = False
+    cfg.generator.use_conversation_multi_turn = True
+    cfg.generator.max_turns = 2
+    cfg.generator.max_input_length = cfg.trainer.max_prompt_length
+    cfg.environment.env_class = "babyai_text"
+
+    with (
+        patch("skyrl.train.utils.utils.validate_batch_sizes"),
+        patch("skyrl.backends.skyrl_train.utils.ppo_utils.repopulate_all_registries"),
+        patch("skyrl.backends.skyrl_train.utils.ppo_utils.PolicyLossRegistry.list_available", return_value=["regular"]),
+        patch(
+            "skyrl.backends.skyrl_train.utils.ppo_utils.AdvantageEstimatorRegistry.list_available",
+            return_value=["state_action_td"],
+        ),
+    ):
+        validate_cfg(cfg)
+
+
+def test_validate_cfg_state_action_td_rejects_trajectory_custom_chat_template(dummy_config):
+    cfg = dummy_config
+    cfg.trainer.algorithm.advantage_estimator = "state_action_td"
+    cfg.trainer.algorithm.use_kl_loss = False
+    cfg.trainer.algorithm.use_kl_in_reward = False
+    cfg.trainer.critic.model.path = "dummy-critic"
+    cfg.trainer.strategy = "fsdp2"
+    cfg.generator.async_engine = True
+    cfg.generator.batched = False
+    cfg.generator.step_wise_trajectories = False
+    cfg.generator.use_conversation_multi_turn = True
+    cfg.generator.max_turns = 2
+    cfg.generator.max_input_length = cfg.trainer.max_prompt_length
+    cfg.generator.chat_template.name_or_path = "qwen3_without_thinking"
+    cfg.environment.env_class = "babyai_text"
+
+    with (
+        patch("skyrl.train.utils.utils.validate_batch_sizes"),
+        patch("skyrl.backends.skyrl_train.utils.ppo_utils.repopulate_all_registries"),
+        patch("skyrl.backends.skyrl_train.utils.ppo_utils.PolicyLossRegistry.list_available", return_value=["regular"]),
+        patch(
+            "skyrl.backends.skyrl_train.utils.ppo_utils.AdvantageEstimatorRegistry.list_available",
+            return_value=["state_action_td"],
+        ),
+    ):
+        with pytest.raises(AssertionError, match="strict TI/TO prompt construction"):
+            validate_cfg(cfg)
+
+
+def test_state_action_td_trajectory_annotation_tracks_step_spans(dummy_config, dummy_generator):
+    cfg = dummy_config
+    cfg.trainer.algorithm.advantage_estimator = "state_action_td"
+    cfg.trainer.algorithm.use_kl_loss = False
+    cfg.trainer.algorithm.use_kl_in_reward = False
+    cfg.trainer.critic.model.path = "dummy-critic"
+    cfg.trainer.strategy = "fsdp2"
+    cfg.generator.step_wise_trajectories = False
+    cfg.generator.use_conversation_multi_turn = True
+    cfg.generator.max_turns = 2
+    cfg.environment.env_class = "babyai_text"
+
+    trainer = RayPPOTrainer(
+        cfg=cfg,
+        tracker=None,
+        tokenizer=None,
+        train_dataset=DummyDataset(),
+        eval_dataset=DummyDataset(),
+        inference_engine_client=None,
+        generator=dummy_generator,
+    )
+
+    data = TrainingInputBatch(
+        {
+            "sequences": torch.tensor([[11, 12, 99, 50, 51, 4, 20, 21, 99, 50, 51, 4, 30, 31]], dtype=torch.long),
+            "attention_mask": torch.ones((1, 14), dtype=torch.long),
+            "response_mask": torch.tensor([[1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]], dtype=torch.long),
+            "loss_mask": torch.tensor([[1, 1, 1, 0, 0, 0, 1, 1, 1, 0, 0]], dtype=torch.float32),
+            "rewards": torch.tensor([[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]], dtype=torch.float32),
+        }
+    )
+    data.metadata = {
+        "uids": ["traj-0"],
+        "response_length": 11,
+        "avg_response_length": 11.0,
+        "state_action_metadata": [
+            {
+                "state_index": [2, 8],
+                "action_end_index": [5, 11],
+                "next_state_index": [8, None],
+                "loss_span_start": [0, 6],
+                "loss_span_end": [3, 9],
+                "step_reward": [0.5, 1.0],
+                "terminated": [False, False],
+                "valid_action": [True, True],
+                "parsed_action": ["turn left", "move forward"],
+                "bootstrap_prompt_ids": [None, [101, 102, 103]],
+            }
+        ],
+    }
+
+    data = trainer._annotate_state_action_step_fields(data)
+
+    assert data["state_action_step_mask"].tolist() == [[True, True]]
+    assert data["state_index"].tolist() == [[2, 8]]
+    assert data["action_end_index"].tolist() == [[5, 11]]
+    assert data["next_state_index"].tolist() == [[8, -1]]
+    assert torch.allclose(data["step_reward"], torch.tensor([[0.5, 1.0]], dtype=torch.float32))
+    assert torch.allclose(data["done"], torch.tensor([[0.0, 0.0]], dtype=torch.float32))
+    assert data.metadata["_state_action_loss_spans"] == [[(0, 3), (6, 9)]]
+    assert data.metadata["_state_action_bootstrap_prompts"] == [
+        {"row_idx": 0, "step_idx": 1, "prompt_ids": [101, 102, 103]}
+    ]
+
+
+def test_state_action_td_trajectory_forward_uses_same_row_next_v_and_bootstrap(
+    dummy_config, dummy_generator, dummy_tokenizer
+):
+    cfg = dummy_config
+    cfg.trainer.algorithm.advantage_estimator = "state_action_td"
+    cfg.trainer.algorithm.use_kl_loss = False
+    cfg.trainer.algorithm.use_kl_in_reward = False
+    cfg.trainer.critic.model.path = "dummy-critic"
+    cfg.trainer.strategy = "fsdp2"
+    cfg.generator.step_wise_trajectories = False
+    cfg.generator.use_conversation_multi_turn = True
+    cfg.generator.max_turns = 2
+    cfg.environment.env_class = "babyai_text"
+
+    trainer = RayPPOTrainer(
+        cfg=cfg,
+        tracker=None,
+        tokenizer=dummy_tokenizer,
+        train_dataset=DummyDataset(),
+        eval_dataset=DummyDataset(),
+        inference_engine_client=None,
+        generator=dummy_generator,
+    )
+    trainer.ref_model = None
+    trainer.dispatch = MagicMock()
+    trainer.dispatch.get_lcm_dp_size.return_value = 1
+    trainer.dispatch.forward.side_effect = [
+        {
+            "q_values": torch.tensor([[0.6, 1.2]], dtype=torch.float32),
+            "v_values": torch.tensor([[0.2, 0.8]], dtype=torch.float32),
+            "next_v_values": torch.tensor([[0.8, 0.0]], dtype=torch.float32),
+        },
+        {
+            "output": torch.tensor([[0.1] * 11], dtype=torch.float32),
+        },
+        {
+            "q_values": torch.tensor([0.0], dtype=torch.float32),
+            "v_values": torch.tensor([0.5], dtype=torch.float32),
+        },
+    ]
+
+    data = TrainingInputBatch(
+        {
+            "sequences": torch.tensor([[11, 12, 99, 50, 51, 4, 20, 21, 99, 50, 51, 4, 30, 31]], dtype=torch.long),
+            "attention_mask": torch.ones((1, 14), dtype=torch.long),
+            "response_mask": torch.tensor([[1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]], dtype=torch.long),
+            "loss_mask": torch.tensor([[1, 1, 1, 0, 0, 0, 1, 1, 1, 0, 0]], dtype=torch.float32),
+        }
+    )
+    data.metadata = {
+        "uids": ["traj-0"],
+        "response_length": 11,
+        "avg_response_length": 11.0,
+        "state_action_metadata": [
+            {
+                "state_index": [2, 8],
+                "action_end_index": [5, 11],
+                "next_state_index": [8, None],
+                "loss_span_start": [0, 6],
+                "loss_span_end": [3, 9],
+                "step_reward": [0.0, 1.0],
+                "terminated": [False, False],
+                "valid_action": [True, True],
+                "parsed_action": ["turn left", "move forward"],
+                "bootstrap_prompt_ids": [None, [101, 102, 103]],
+            }
+        ],
+    }
+
+    data = trainer._annotate_state_action_step_fields(data)
+    data = trainer.fwd_logprobs_values_reward(data)
+
+    assert torch.allclose(data["q_values"], torch.tensor([[0.6, 1.2]], dtype=torch.float32))
+    assert torch.allclose(data["v_values"], torch.tensor([[0.2, 0.8]], dtype=torch.float32))
+    assert torch.allclose(data["next_v_values"], torch.tensor([[0.8, 0.5]], dtype=torch.float32))
+
+    critic_call = trainer.dispatch.forward.call_args_list[0]
+    assert "next_state_index" in critic_call.args[1]
+
+
+@pytest.mark.parametrize(
+    ("actor_advantage_type", "expected_advantages"),
+    [
+        ("q_minus_v", torch.tensor([[0.4, 0.4, 0.4, 0.0, 0.0, 0.0, 0.4, 0.4, 0.4]], dtype=torch.float32)),
+        ("gae", torch.tensor([[0.664, 0.664, 0.664, 0.0, 0.0, 0.0, 0.2, 0.2, 0.2]], dtype=torch.float32)),
+        ("td_delta", torch.tensor([[0.52, 0.52, 0.52, 0.0, 0.0, 0.0, 0.2, 0.2, 0.2]], dtype=torch.float32)),
+    ],
+)
+def test_state_action_td_trajectory_actor_advantage_types(
+    dummy_config, dummy_generator, actor_advantage_type, expected_advantages
+):
+    cfg = dummy_config
+    cfg.trainer.algorithm.advantage_estimator = "state_action_td"
+    cfg.trainer.algorithm.use_kl_loss = False
+    cfg.trainer.algorithm.use_kl_in_reward = False
+    cfg.trainer.algorithm.advantage_batch_normalize = False
+    cfg.trainer.algorithm.gamma = 0.9
+    cfg.trainer.algorithm.lambd = 0.8
+    cfg.trainer.algorithm.state_action.actor_advantage_type = actor_advantage_type
+    cfg.trainer.critic.model.path = "dummy-critic"
+    cfg.trainer.strategy = "fsdp2"
+    cfg.generator.step_wise_trajectories = False
+    cfg.generator.use_conversation_multi_turn = True
+    cfg.generator.max_turns = 2
+    cfg.environment.env_class = "babyai_text"
+
+    trainer = RayPPOTrainer(
+        cfg=cfg,
+        tracker=None,
+        tokenizer=None,
+        train_dataset=DummyDataset(),
+        eval_dataset=DummyDataset(),
+        inference_engine_client=None,
+        generator=dummy_generator,
+    )
+
+    data = TrainingInputBatch(
+        {
+            "loss_mask": torch.tensor([[1, 1, 1, 0, 0, 0, 1, 1, 1]], dtype=torch.float32),
+            "response_mask": torch.ones((1, 9), dtype=torch.long),
+            "rewards": torch.tensor([[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]], dtype=torch.float32),
+            "state_action_step_mask": torch.tensor([[True, True]], dtype=torch.bool),
+            "step_reward": torch.tensor([[0.0, 1.0]], dtype=torch.float32),
+            "done": torch.tensor([[0.0, 1.0]], dtype=torch.float32),
+            "action_valid": torch.tensor([[1.0, 1.0]], dtype=torch.float32),
+            "parsed_action_id": torch.tensor([[0, 1]], dtype=torch.long),
+            "q_values": torch.tensor([[0.6, 1.2]], dtype=torch.float32),
+            "v_values": torch.tensor([[0.2, 0.8]], dtype=torch.float32),
+            "next_v_values": torch.tensor([[0.8, 0.0]], dtype=torch.float32),
+        }
+    )
+    data.metadata = {
+        "uids": ["traj-0"],
+        "avg_response_length": 9.0,
+        "_state_action_loss_spans": [[(0, 3), (6, 9)]],
+    }
+
+    data = trainer.compute_advantages_and_returns(data)
+
+    assert torch.allclose(data["advantages"], expected_advantages, atol=1e-6)
+    assert torch.allclose(data["returns"], torch.tensor([[0.864, 0.864, 0.864, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0]]))
+    assert torch.allclose(data["q_targets"], torch.tensor([[0.72, 1.0]], dtype=torch.float32), atol=1e-6)
+    assert torch.allclose(data["v_targets"], torch.tensor([[0.864, 1.0]], dtype=torch.float32), atol=1e-6)
+
+
+def test_critic_model_wrapper_supports_trajectory_state_action_gathers():
+    pytest.importorskip("flash_attn")
+    from skyrl.backends.skyrl_train.workers.model_wrapper import _get_critic_model
+
+    class DummyPretrainedModel(nn.Module):
+        base_model_prefix = "model"
+
+        def __init__(self, config):
+            super().__init__()
+            self.config = config
+
+    class DummyBaseModel(nn.Module):
+        def __init__(self, config):
+            super().__init__()
+            self.config = config
+
+        def forward(self, input_ids, attention_mask=None, position_ids=None):
+            return {"last_hidden_state": input_ids.float().unsqueeze(-1)}
+
+    CriticModel = _get_critic_model(DummyPretrainedModel, DummyBaseModel)
+    model = CriticModel(SimpleNamespace(hidden_size=1, _attn_implementation="sdpa"))
+    getattr(model, model.value_head_prefix).weight.data.fill_(1.0)
+    getattr(model, model.q_head_prefix).weight.data.fill_(1.0)
+
+    outputs = model(
+        input_ids=torch.tensor([[5, 6, 7, 8], [1, 2, 3, 4]], dtype=torch.long),
+        attention_mask=torch.ones((2, 4), dtype=torch.long),
+        state_index=torch.tensor([[1, 3], [0, 2]], dtype=torch.long),
+        action_end_index=torch.tensor([[2, 3], [1, 3]], dtype=torch.long),
+        next_state_index=torch.tensor([[3, -1], [2, 3]], dtype=torch.long),
+    )
+
+    assert torch.allclose(outputs["v_values"], torch.tensor([[6.0, 8.0], [1.0, 3.0]]))
+    assert torch.allclose(outputs["q_values"], torch.tensor([[7.0, 8.0], [2.0, 4.0]]))
+    assert torch.allclose(outputs["next_v_values"], torch.tensor([[8.0, 0.0], [3.0, 4.0]]))
 
 
 def test_validate_cfg_requires_wandb_api_key_for_logger_list(dummy_config):
@@ -1186,7 +1508,15 @@ def test_validate_cfg_requires_wandb_api_key_for_logger_list(dummy_config):
     cfg.trainer.logger = ["wandb", "console"]
 
     with patch.dict(os.environ, {}, clear=True):
-        with patch("skyrl.train.utils.utils.validate_batch_sizes"):
+        with (
+            patch("skyrl.train.utils.utils.validate_batch_sizes"),
+            patch("skyrl.backends.skyrl_train.utils.ppo_utils.repopulate_all_registries"),
+            patch("skyrl.backends.skyrl_train.utils.ppo_utils.PolicyLossRegistry.list_available", return_value=["regular"]),
+            patch(
+                "skyrl.backends.skyrl_train.utils.ppo_utils.AdvantageEstimatorRegistry.list_available",
+                return_value=["grpo", "state_action_td"],
+            ),
+        ):
             with pytest.raises(AssertionError, match="WANDB_API_KEY"):
                 validate_cfg(cfg)
 
@@ -1196,5 +1526,13 @@ def test_validate_cfg_accepts_wandb_in_logger_list_with_api_key(dummy_config):
     cfg.trainer.logger = ["wandb", "console"]
 
     with patch.dict(os.environ, {"WANDB_API_KEY": "dummy-key"}, clear=True):
-        with patch("skyrl.train.utils.utils.validate_batch_sizes"):
+        with (
+            patch("skyrl.train.utils.utils.validate_batch_sizes"),
+            patch("skyrl.backends.skyrl_train.utils.ppo_utils.repopulate_all_registries"),
+            patch("skyrl.backends.skyrl_train.utils.ppo_utils.PolicyLossRegistry.list_available", return_value=["regular"]),
+            patch(
+                "skyrl.backends.skyrl_train.utils.ppo_utils.AdvantageEstimatorRegistry.list_available",
+                return_value=["grpo", "state_action_td"],
+            ),
+        ):
             validate_cfg(cfg)

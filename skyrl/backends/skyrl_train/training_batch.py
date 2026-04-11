@@ -475,6 +475,7 @@ class TrainingInput(TypedDict, total=False):
     state_index: Optional[Integer[torch.Tensor, "batch_size"]]
     action_end_index: Optional[Integer[torch.Tensor, "batch_size"]]
     next_state_index: Optional[Integer[torch.Tensor, "batch_size"]]
+    state_action_step_mask: Optional[Bool[torch.Tensor, "batch_size max_steps"]]
     parsed_action_id: Optional[Integer[torch.Tensor, "batch_size"]]
     action_valid: Optional[Float[torch.Tensor, "batch_size"]]
     q_values: Optional[Float[torch.Tensor, "batch_size"]]

@@ -1126,7 +1126,11 @@ class CriticWorkerBase(Worker):
             action_end_index = experience.action_end_index
             q_targets = experience.q_targets
             v_targets = experience.v_targets
-            valid_mask = (loss_mask.sum(dim=-1) > 0).float()
+            state_action_step_mask = experience.state_action_step_mask
+            if state_action_step_mask is not None:
+                valid_mask = state_action_step_mask.float()
+            else:
+                valid_mask = (loss_mask.sum(dim=-1) > 0).float()
 
             with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
                 critic_inputs = dict(

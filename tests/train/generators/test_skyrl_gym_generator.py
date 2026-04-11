@@ -376,6 +376,7 @@ def test_generator_output_concatenation():
         "trajectory_ids",
         "is_last_step",
         "step_metadata",
+        "state_action_metadata",
     ]
     assert set(GeneratorOutput.__annotations__.keys()) == set(expected_fields), (
         "GeneratorOutput fields are not what we expect. "
@@ -391,6 +392,32 @@ def test_generator_output_concatenation():
         "stop_reasons": ["stop", "stop"],
         "rollout_logprobs": [[0.1, 0.2], [0.3, 0.4]],
         "step_metadata": [{"parsed_action": "left"}, {"parsed_action": "right"}],
+        "state_action_metadata": [
+            {
+                "state_index": [1],
+                "action_end_index": [2],
+                "next_state_index": [None],
+                "loss_span_start": [0],
+                "loss_span_end": [2],
+                "step_reward": [1.0],
+                "terminated": [True],
+                "valid_action": [True],
+                "parsed_action": ["left"],
+                "bootstrap_prompt_ids": [None],
+            },
+            {
+                "state_index": [1],
+                "action_end_index": [2],
+                "next_state_index": [None],
+                "loss_span_start": [0],
+                "loss_span_end": [2],
+                "step_reward": [2.0],
+                "terminated": [True],
+                "valid_action": [True],
+                "parsed_action": ["right"],
+                "bootstrap_prompt_ids": [None],
+            },
+        ],
         "step_model_token_counts": [[2], [2]],
     }
 
@@ -402,6 +429,32 @@ def test_generator_output_concatenation():
         "stop_reasons": ["stop", "stop"],
         "rollout_logprobs": [[0.5, 0.6, 0.7], [0.8]],
         "step_metadata": [{"parsed_action": "done"}, {"parsed_action": "pickup"}],
+        "state_action_metadata": [
+            {
+                "state_index": [2],
+                "action_end_index": [4],
+                "next_state_index": [None],
+                "loss_span_start": [0],
+                "loss_span_end": [3],
+                "step_reward": [2.0],
+                "terminated": [True],
+                "valid_action": [True],
+                "parsed_action": ["done"],
+                "bootstrap_prompt_ids": [None],
+            },
+            {
+                "state_index": [0],
+                "action_end_index": [0],
+                "next_state_index": [None],
+                "loss_span_start": [0],
+                "loss_span_end": [1],
+                "step_reward": [3.0],
+                "terminated": [True],
+                "valid_action": [True],
+                "parsed_action": ["pickup"],
+                "bootstrap_prompt_ids": [None],
+            },
+        ],
         "step_model_token_counts": [[3], [1]],
     }
 
@@ -419,6 +472,12 @@ def test_generator_output_concatenation():
         {"parsed_action": "right"},
         {"parsed_action": "done"},
         {"parsed_action": "pickup"},
+    ]
+    assert [metadata["parsed_action"][0] for metadata in concatenated_output["state_action_metadata"]] == [
+        "left",
+        "right",
+        "done",
+        "pickup",
     ]
     assert concatenated_output["step_model_token_counts"] == [[2], [2], [3], [1]]
 
@@ -1775,6 +1834,119 @@ async def test_step_wise_rollout_metrics_are_trajectory_level(mock_make, mock_to
     assert rollout_metrics["response_lengths/avg_num_model_tokens_per_step"] == pytest.approx(4.0)
     assert rollout_metrics["environment/avg_steps"] == pytest.approx(2.0)
     assert rollout_metrics["environment/success_rate"] == pytest.approx(1.0)
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_non_step_wise_generation_emits_state_action_metadata(
+    mock_make, mock_tokenizer, mock_llm, mock_env_cfg
+):
+    mock_env_cfg.env_class = "babyai_text"
+    mock_tokenizer.eos_token_id = 4
+
+    def apply_chat_template_side_effect(messages, **kwargs):
+        if not kwargs.get("tokenize", True):
+            return "".join(message.get("content", "") for message in messages)
+        token_ids = []
+        for idx, _message in enumerate(messages):
+            token_ids.extend([10 * (idx + 1), 10 * (idx + 1) + 1])
+        if kwargs.get("add_generation_prompt", False):
+            token_ids.append(99)
+        return token_ids
+
+    mock_tokenizer.apply_chat_template.side_effect = apply_chat_template_side_effect
+
+    async def llm_generate_side_effect(_input_batch):
+        return {
+            "responses": ["step"],
+            "stop_reasons": ["stop"],
+            "response_logprobs": None,
+            "response_ids": [[50, 51, mock_tokenizer.eos_token_id]],
+        }
+
+    mock_llm.generate = AsyncMock(side_effect=llm_generate_side_effect)
+
+    class TruncatedMultiStepEnv(BaseTextEnv):
+        def __init__(self):
+            super().__init__()
+            self.turns = 0
+
+        def init(self, prompt):
+            return prompt, {}
+
+        def step(self, action):
+            self.turns += 1
+            if self.turns == 1:
+                return BaseTextEnvStepOutput(
+                    observations=[{"role": "user", "content": "obs1"}],
+                    reward=0.5,
+                    done=False,
+                    metadata={
+                        "parsed_action": "turn left",
+                        "valid_action": True,
+                        "success": False,
+                        "steps": 1,
+                        "terminated": False,
+                        "truncated": False,
+                    },
+                )
+            return BaseTextEnvStepOutput(
+                observations=[{"role": "user", "content": "boundary"}],
+                reward=1.0,
+                done=True,
+                metadata={
+                    "parsed_action": "move forward",
+                    "valid_action": True,
+                    "success": False,
+                    "steps": 2,
+                    "terminated": False,
+                    "truncated": True,
+                },
+            )
+
+    mock_make.side_effect = lambda *args, **kwargs: TruncatedMultiStepEnv()
+
+    cfg = GeneratorConfig()
+    cfg.sampling_params.max_generate_length = 50
+    cfg.sampling_params.logprobs = None
+    cfg.apply_overlong_filtering = False
+    cfg.max_input_length = 512
+    cfg.batched = False
+    cfg.max_turns = 10
+    cfg.zero_reward_on_non_stop = False
+    cfg.use_conversation_multi_turn = True
+    cfg.step_wise_trajectories = False
+    cfg.chat_template = ChatTemplateConfig(source="name", name_or_path=None)
+
+    generator = SkyRLGymGenerator(
+        generator_cfg=cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+    )
+    generator.base_conversation_token_ids = []
+
+    input_batch: GeneratorInput = {
+        "prompts": [[{"role": "user", "content": "Q?"}]],
+        "env_extras": [{"test": "value"}],
+        "env_classes": [mock_env_cfg.env_class],
+        "trajectory_ids": None,
+    }
+
+    generator_output: GeneratorOutput = await generator.generate(input_batch)
+    metadata = generator_output["state_action_metadata"][0]
+
+    assert metadata["state_index"] == [2, 12]
+    assert metadata["action_end_index"] == [5, 15]
+    assert metadata["next_state_index"] == [12, None]
+    assert metadata["loss_span_start"] == [0, 10]
+    assert metadata["loss_span_end"] == [3, 13]
+    assert metadata["step_reward"] == [0.5, 1.0]
+    assert metadata["terminated"] == [False, False]
+    assert metadata["valid_action"] == [True, True]
+    assert metadata["parsed_action"] == ["turn left", "move forward"]
+    assert metadata["bootstrap_prompt_ids"][0] is None
+    assert metadata["bootstrap_prompt_ids"][1] == [10, 11, 20, 21, 30, 31, 40, 41, 50, 51, 99]
 
 
 @pytest.mark.asyncio

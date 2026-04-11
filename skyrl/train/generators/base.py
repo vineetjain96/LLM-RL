@@ -31,6 +31,19 @@ class GeneratorInput(TypedDict):
     batch_metadata: Optional[BatchMetadata]
 
 
+class StateActionTrajectoryMetadata(TypedDict):
+    state_index: List[int]
+    action_end_index: List[int]
+    next_state_index: List[Optional[int]]
+    loss_span_start: List[int]
+    loss_span_end: List[int]
+    step_reward: List[float]
+    terminated: List[bool]
+    valid_action: List[bool]
+    parsed_action: List[Optional[str]]
+    bootstrap_prompt_ids: List[Optional[List[int]]]
+
+
 class GeneratorOutput(TypedDict):
     prompt_token_ids: List[List[int]]
     response_ids: List[List[int]]
@@ -44,6 +57,7 @@ class GeneratorOutput(TypedDict):
     # Applicable only for step-wise training
     is_last_step: Optional[List[bool]]
     step_metadata: Optional[List[Dict[str, Any]]]
+    state_action_metadata: Optional[List[StateActionTrajectoryMetadata]]
 
 
 class MetricsOutput(TypedDict):

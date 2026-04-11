@@ -267,12 +267,16 @@ def validate_cfg(cfg: SkyRLTrainConfig):
             "fsdp2",
         ), "state_action_td is only supported with FSDP/FSDP2 in v1"
         assert cfg.trainer.critic.model.path, "state_action_td requires trainer.critic.model.path to be set"
-        assert cfg.generator.step_wise_trajectories, "state_action_td requires generator.step_wise_trajectories=true"
         assert not cfg.generator.batched, "state_action_td requires generator.batched=false"
         assert (
             cfg.generator.use_conversation_multi_turn
         ), "state_action_td requires generator.use_conversation_multi_turn=true"
         assert cfg.environment.env_class == "babyai_text", "state_action_td is only supported for babyai_text in v1"
+        if not cfg.generator.step_wise_trajectories:
+            assert cfg.generator.chat_template.name_or_path is None, (
+                "Trajectory state_action_td requires strict TI/TO prompt construction; "
+                "custom chat templates are not supported"
+            )
 
         if state_action_cfg.actor_advantage_type != "q_minus_v" and state_action_cfg.q_loss_coef != 0.0:
             logger.info(

@@ -28,6 +28,7 @@ from skyrl.train.generators.base import (
     GeneratorInput,
     GeneratorInterface,
     GeneratorOutput,
+    StateActionTrajectoryMetadata,
     TrajectoryID,
 )
 from skyrl.train.generators.utils import (
@@ -51,6 +52,7 @@ class TrajectoryOutput:
     rollout_logprobs: Optional[List[float]]
     env_metrics: Dict[str, Any]
     step_metadata: Optional[Dict[str, Any]] = None
+    state_action_metadata: Optional[StateActionTrajectoryMetadata] = None
     rollout_expert_indices: Optional[List[List[List[int]]]] = None
     step_model_token_counts: Optional[List[int]] = None
 
@@ -300,8 +302,21 @@ class SkyRLGymGenerator(GeneratorInterface):
         # Accumulate per-step rewards. Format: (reward, response_end_token_idx)
         per_step_rewards: List[Tuple[float, Optional[int]]] = []
         step_model_token_counts: List[int] = []
-
         is_step_wise = self.generator_cfg.step_wise_trajectories
+        state_action_metadata: Optional[StateActionTrajectoryMetadata] = None
+        if not is_step_wise and not retokenize_chat_history and self.use_conversation_multi_turn:
+            state_action_metadata = {
+                "state_index": [],
+                "action_end_index": [],
+                "next_state_index": [],
+                "loss_span_start": [],
+                "loss_span_end": [],
+                "step_reward": [],
+                "terminated": [],
+                "valid_action": [],
+                "parsed_action": [],
+                "bootstrap_prompt_ids": [],
+            }
 
         agent_loop_output = StepWiseOutput(step_outputs=[]) if is_step_wise else None
 
@@ -334,6 +349,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                 )
                 agent_loop_state.loss_mask = []
                 agent_loop_state.rollout_logprobs = None
+            prompt_ids_before_turn = list(agent_loop_state.input_ids)
 
             engine_input = InferenceEngineInput(
                 prompt_token_ids=[agent_loop_state.input_ids], session_ids=[session_id], sampling_params=sampling_params
@@ -451,6 +467,36 @@ class SkyRLGymGenerator(GeneratorInterface):
                 bootstrap_metadata["bootstrap_prompt_ids"] = bootstrap_prompt_ids
                 last_step_output.step_metadata = bootstrap_metadata
 
+            if state_action_metadata is not None:
+                metadata = dict(env_step_output.get("metadata", {}) or {})
+                action_token_count = int(sum(turn_loss_mask))
+                response_offset = len(prompt_ids_before_turn) - initial_prompt_length
+                next_state_index = None
+                if not agent_loop_state.done:
+                    next_state_index = len(agent_loop_state.input_ids) - 1
+
+                bootstrap_prompt_ids = None
+                if self._should_emit_bootstrap_state(env_step_output):
+                    bootstrap_prompt_ids = self._build_step_wise_bootstrap_prompt_ids(
+                        agent_loop_state.chat_history,
+                        retokenize_chat_history,
+                    )
+
+                state_action_metadata["state_index"].append(len(prompt_ids_before_turn) - 1)
+                state_action_metadata["action_end_index"].append(
+                    len(prompt_ids_before_turn) + action_token_count - 1
+                    if action_token_count > 0
+                    else len(prompt_ids_before_turn) - 1
+                )
+                state_action_metadata["next_state_index"].append(next_state_index)
+                state_action_metadata["loss_span_start"].append(response_offset)
+                state_action_metadata["loss_span_end"].append(response_offset + action_token_count)
+                state_action_metadata["step_reward"].append(float(step_reward))
+                state_action_metadata["terminated"].append(bool(metadata.get("terminated", False)))
+                state_action_metadata["valid_action"].append(bool(metadata.get("valid_action", action_token_count > 0)))
+                state_action_metadata["parsed_action"].append(metadata.get("parsed_action"))
+                state_action_metadata["bootstrap_prompt_ids"].append(bootstrap_prompt_ids)
+
             per_step_rewards.append((step_reward, agent_loop_state.response_end_idx))
 
         # Get environment-specific metrics after the episode is done
@@ -534,6 +580,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                 prompt_ids=prompt_ids,
                 rollout_logprobs=rollout_logprobs,
                 env_metrics=env_metrics,
+                state_action_metadata=state_action_metadata,
                 rollout_expert_indices=rollout_expert_indices_out,
                 step_model_token_counts=step_model_token_counts,
             )
@@ -828,6 +875,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             out_env_classes = []
             step_metadata = []
             step_model_token_counts = []
+            state_action_metadata = None
             for i, output in enumerate(all_outputs):
                 step_model_token_counts.append([int(sum(step_output.loss_mask)) for step_output in output.step_outputs])
                 for j, step_output in enumerate(output.step_outputs):
@@ -853,6 +901,10 @@ class SkyRLGymGenerator(GeneratorInterface):
             out_trajectory_ids = None
             step_metadata = None
             step_model_token_counts = [output.step_model_token_counts or [] for output in all_outputs]
+            if any(output.state_action_metadata is not None for output in all_outputs):
+                state_action_metadata = [output.state_action_metadata for output in all_outputs]
+            else:
+                state_action_metadata = None
 
         if sampling_params is not None:
             # sampling params will be a dict in the format of the inference engine backend
@@ -906,6 +958,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             "rollout_expert_indices": rollout_expert_indices,
             "is_last_step": is_last_step,
             "step_metadata": step_metadata,
+            "state_action_metadata": state_action_metadata,
             "step_model_token_counts": step_model_token_counts,
         }
 
