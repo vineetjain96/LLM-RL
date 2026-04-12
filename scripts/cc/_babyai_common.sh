@@ -56,6 +56,17 @@ cc_babyai_prepare_layout() {
   : "${DATASET_ENV_NAME:="$ENV_NAME"}"
   : "${DATASET_ENV_KWARGS_JSON:="$ENV_KWARGS_JSON"}"
   : "${DATASET_DIFFICULTY:=easy}"
+  : "${REWARD_MODE:=binary_outcome}"
+  : "${REWARD_ON_SUCCESS:=1.0}"
+  : "${STEP_PENALTY:=0.0}"
+  : "${ENABLE_EVAL_SUITE:=false}"
+  : "${EVAL_SUITE_PARAM_1:=}"
+  : "${EVAL_SUITE_VALUES_1:=}"
+  : "${EVAL_SUITE_PARAM_2:=}"
+  : "${EVAL_SUITE_VALUES_2:=}"
+  : "${EVAL_SUITE_INCLUDE_JOINT:=true}"
+  : "${EVAL_SUITE_EXAMPLES_PER_CONDITION:=64}"
+  : "${EVAL_SUITE_DATA_SOURCE_PREFIX:=babyai_eval}"
   : "${RUN_NAME_TIMESTAMP:="$(date -u +%Y%m%d_%H%M%S)"}"
   : "${RUN_NAME_SUFFIX:=}"
 
@@ -63,6 +74,8 @@ cc_babyai_prepare_layout() {
   local model_tag
   local dataset_env_tag
   local dataset_kwargs_hash
+  local reward_tag
+  local eval_suite_tag
   local dataset_tag
   local run_name
 
@@ -76,7 +89,17 @@ cc_babyai_prepare_layout() {
     dataset_kwargs_hash="kwnone"
   fi
 
-  dataset_tag="${dataset_env_tag}_${DATASET_DIFFICULTY}_turns${MAX_TURNS}_${dataset_kwargs_hash}"
+  reward_tag="rwd$(printf '%s' "${REWARD_MODE}|${REWARD_ON_SUCCESS}|${STEP_PENALTY}" | sha1sum | awk '{print substr($1, 1, 8)}')"
+
+  if cc_babyai_is_truthy "$ENABLE_EVAL_SUITE"; then
+    eval_suite_tag="eval$(printf '%s' \
+      "${EVAL_SUITE_PARAM_1}|${EVAL_SUITE_VALUES_1}|${EVAL_SUITE_PARAM_2}|${EVAL_SUITE_VALUES_2}|${EVAL_SUITE_INCLUDE_JOINT}|${EVAL_SUITE_EXAMPLES_PER_CONDITION}|${EVAL_SUITE_DATA_SOURCE_PREFIX}" \
+      | sha1sum | awk '{print substr($1, 1, 8)}')"
+  else
+    eval_suite_tag="evalnone"
+  fi
+
+  dataset_tag="${dataset_env_tag}_${DATASET_DIFFICULTY}_turns${MAX_TURNS}_${dataset_kwargs_hash}_${reward_tag}_${eval_suite_tag}"
   : "${DATA_DIR:="$EXPERIMENT_ROOT/data/$dataset_tag"}"
 
   run_name="${ALGO_NAME}_${env_tag}_${model_tag}_${RUN_NAME_TIMESTAMP}"
@@ -168,10 +191,35 @@ cc_babyai_ensure_dataset() {
     --train_size "$DATASET_TRAIN_SIZE"
     --val_size "$DATASET_VAL_SIZE"
     --max_turns "$MAX_TURNS"
+    --reward_mode "$REWARD_MODE"
+    --reward_on_success "$REWARD_ON_SUCCESS"
+    --step_penalty "$STEP_PENALTY"
   )
 
   if [[ -n "$DATASET_ENV_NAME" ]]; then
     dataset_cmd+=(--env_name "$DATASET_ENV_NAME")
+  fi
+
+  if cc_babyai_is_truthy "$ENABLE_EVAL_SUITE"; then
+    dataset_cmd+=(
+      --eval_examples_per_condition "$EVAL_SUITE_EXAMPLES_PER_CONDITION"
+      --eval_include_joint_curve "$EVAL_SUITE_INCLUDE_JOINT"
+      --eval_data_source_prefix "$EVAL_SUITE_DATA_SOURCE_PREFIX"
+    )
+
+    if [[ -n "$EVAL_SUITE_PARAM_1" ]]; then
+      dataset_cmd+=(
+        --eval_curve_param_1 "$EVAL_SUITE_PARAM_1"
+        --eval_curve_values_1 "$EVAL_SUITE_VALUES_1"
+      )
+    fi
+
+    if [[ -n "$EVAL_SUITE_PARAM_2" ]]; then
+      dataset_cmd+=(
+        --eval_curve_param_2 "$EVAL_SUITE_PARAM_2"
+        --eval_curve_values_2 "$EVAL_SUITE_VALUES_2"
+      )
+    fi
   fi
 
   "${dataset_cmd[@]}"
@@ -280,7 +328,20 @@ Checkpoint dir:  $CKPT_PATH
 Ray temp dir:    $RAY_TMPDIR
 Run name:        $RUN_NAME
 Logger:          $LOGGER
+Reward mode:     ${REWARD_MODE}
+Reward success:  ${REWARD_ON_SUCCESS}
+Step penalty:    ${STEP_PENALTY}
+Eval suite:      ${ENABLE_EVAL_SUITE}
 EOF
+
+  if cc_babyai_is_truthy "$ENABLE_EVAL_SUITE"; then
+    cat <<EOF
+  Eval param 1:  ${EVAL_SUITE_PARAM_1}=[${EVAL_SUITE_VALUES_1}]
+  Eval param 2:  ${EVAL_SUITE_PARAM_2}=[${EVAL_SUITE_VALUES_2}]
+  Eval joint:    ${EVAL_SUITE_INCLUDE_JOINT}
+  Eval rows/cond:${EVAL_SUITE_EXAMPLES_PER_CONDITION}
+EOF
+  fi
 }
 
 cc_babyai_validate_overrides() {

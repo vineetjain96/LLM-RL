@@ -1,6 +1,8 @@
 import numpy as np
+import pytest
 
 from skyrl_gym.envs.babyai_text.env import BabyAITextEnv
+from skyrl_gym.envs.babyai_text import utils
 
 
 class _DummyUnwrappedEnv:
@@ -57,6 +59,11 @@ def test_invalid_action_before_turn_cap_returns_feedback():
         "truncated": False,
         "env_truncated": False,
         "turn_limit_reached": False,
+        "reward_mode": "binary_outcome",
+        "completed_subgoals": 0,
+        "total_subgoals": 0,
+        "subgoal_potential": 0.0,
+        "subgoal_potential_delta": 0.0,
     }
 
 
@@ -80,6 +87,11 @@ def test_invalid_action_at_turn_cap_ends_episode():
         "truncated": True,
         "env_truncated": False,
         "turn_limit_reached": True,
+        "reward_mode": "binary_outcome",
+        "completed_subgoals": 0,
+        "total_subgoals": 0,
+        "subgoal_potential": 0.0,
+        "subgoal_potential_delta": 0.0,
     }
 
 
@@ -104,6 +116,11 @@ def test_truncated_step_returns_boundary_observation_and_flags():
         "truncated": True,
         "env_truncated": True,
         "turn_limit_reached": False,
+        "reward_mode": "binary_outcome",
+        "completed_subgoals": 0,
+        "total_subgoals": 0,
+        "subgoal_potential": 0.0,
+        "subgoal_potential_delta": 0.0,
     }
 
 
@@ -116,6 +133,7 @@ def test_terminated_step_does_not_return_boundary_observation():
     result = env.step("<action>move forward</action>")
 
     assert result["done"] is True
+    assert result["reward"] == 1.0
     assert result["observations"] == []
     assert result["metadata"] == {
         "parsed_action": "move forward",
@@ -126,4 +144,82 @@ def test_terminated_step_does_not_return_boundary_observation():
         "truncated": False,
         "env_truncated": False,
         "turn_limit_reached": False,
+        "reward_mode": "binary_outcome",
+        "completed_subgoals": 0,
+        "total_subgoals": 0,
+        "subgoal_potential": 0.0,
+        "subgoal_potential_delta": 0.0,
     }
+
+
+def test_efficiency_outcome_reward_matches_previous_shaping():
+    env = BabyAITextEnv(
+        env_config={},
+        extras={"max_turns": 5, "reward_spec": {"reward_mode": "efficiency_outcome"}},
+    )
+    env._env = _DummyStepEnv(({"mission": "go to the red ball"}, 1.0, True, False, {}))
+    env._obs = {"mission": "go to the red ball"}
+    env._mission = "go to the red ball"
+
+    result = env.step("<action>move forward</action>")
+
+    assert result["done"] is True
+    assert result["reward"] == pytest.approx(0.9)
+    assert result["metadata"]["reward_mode"] == "efficiency_outcome"
+
+
+def test_subgoal_delta_reward_uses_potential_difference():
+    env = BabyAITextEnv(
+        env_config={},
+        extras={"max_turns": 5, "reward_spec": {"reward_mode": "subgoal_delta"}},
+    )
+    env._env = _DummyStepEnv(({"mission": "go to the red ball"}, 0.0, False, False, {}))
+    env._obs = {"mission": "go to the red ball"}
+    env._mission = "go to the red ball"
+    env._completed_subgoals = 1
+    env._total_subgoals = 4
+    env._subgoal_potential = 0.25
+    env._refresh_subgoal_progress = lambda success_override=False: (2, 4, 0.5)
+
+    result = env.step("<action>move forward</action>")
+
+    assert result["done"] is False
+    assert result["reward"] == pytest.approx(0.25)
+    assert result["metadata"]["reward_mode"] == "subgoal_delta"
+    assert result["metadata"]["completed_subgoals"] == 2
+    assert result["metadata"]["total_subgoals"] == 4
+    assert result["metadata"]["subgoal_potential"] == pytest.approx(0.5)
+    assert result["metadata"]["subgoal_potential_delta"] == pytest.approx(0.25)
+
+
+def test_get_subgoal_progress_handles_nested_partial_sequences():
+    verifier = pytest.importorskip("minigrid.envs.babyai.core.verifier")
+
+    first = verifier.GoToInstr(verifier.ObjDesc("key", "red"))
+    second = verifier.GoToInstr(verifier.ObjDesc("ball", "blue"))
+    partial_and = verifier.AndInstr(first, second)
+    partial_and.a_done = "success"
+    partial_and.b_done = "continue"
+
+    final = verifier.GoToInstr(verifier.ObjDesc("door", "green"))
+    root = verifier.BeforeInstr(partial_and, final)
+    root.a_done = "continue"
+    root.b_done = False
+
+    completed, total, potential = utils.get_subgoal_progress(root, success=False)
+
+    assert completed == 1
+    assert total == 3
+    assert potential == pytest.approx(1 / 3)
+
+
+def test_get_subgoal_progress_success_override_marks_atomic_task_complete():
+    verifier = pytest.importorskip("minigrid.envs.babyai.core.verifier")
+
+    atomic_task = verifier.GoToInstr(verifier.ObjDesc("key", "red"))
+
+    completed, total, potential = utils.get_subgoal_progress(atomic_task, success=True)
+
+    assert completed == 1
+    assert total == 1
+    assert potential == 1.0

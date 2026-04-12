@@ -59,6 +59,9 @@ class BabyAITextEnv(BaseTextEnv):
 
         # Reward configuration
         reward_spec = extras.get("reward_spec", {})
+        self.reward_mode = utils.validate_reward_mode(
+            reward_spec.get("reward_mode", utils.REWARD_MODE_BINARY_OUTCOME)
+        )
         self.reward_on_success = reward_spec.get("reward_on_success", 1.0)
         self.step_penalty = reward_spec.get("step_penalty", 0.0)
 
@@ -75,6 +78,9 @@ class BabyAITextEnv(BaseTextEnv):
         self._step_count = 0
         self._done = False
         self._success = False
+        self._completed_subgoals = 0
+        self._total_subgoals = 0
+        self._subgoal_potential = 0.0
 
     def _create_env(self):
         """Create the underlying BabyAI/MiniGrid environment."""
@@ -227,6 +233,7 @@ class BabyAITextEnv(BaseTextEnv):
 
         # Generate initial observation
         obs_text = self._get_text_observation()
+        self._refresh_subgoal_progress()
         formatted_obs = utils.format_observation(
             obs_text=obs_text,
             mission=self._mission,
@@ -259,6 +266,21 @@ class BabyAITextEnv(BaseTextEnv):
             max_steps=self.max_turns,
         )
 
+    def _refresh_subgoal_progress(self, success_override: bool = False) -> Tuple[int, int, float]:
+        """Update cached subgoal progress from the underlying BabyAI verifier state."""
+        instr = None
+        if self._env is not None and hasattr(self._env, "unwrapped"):
+            instr = getattr(self._env.unwrapped, "instrs", None)
+
+        completed_subgoals, total_subgoals, subgoal_potential = utils.get_subgoal_progress(
+            instr,
+            success=success_override,
+        )
+        self._completed_subgoals = completed_subgoals
+        self._total_subgoals = total_subgoals
+        self._subgoal_potential = subgoal_potential
+        return completed_subgoals, total_subgoals, subgoal_potential
+
     def step(self, action: str) -> BaseTextEnvStepOutput:
         """
         Execute one step in the environment.
@@ -271,6 +293,7 @@ class BabyAITextEnv(BaseTextEnv):
         """
         self.turns += 1
         self._step_count += 1
+        subgoal_potential_before = self._subgoal_potential
 
         # Parse the text action
         action_idx = utils.parse_action(action)
@@ -280,12 +303,14 @@ class BabyAITextEnv(BaseTextEnv):
             self._done = turn_limit_reached
             self._success = False
             final_reward = utils.compute_reward(
+                reward_mode=self.reward_mode,
                 done=self._done,
                 success=False,
                 step_count=self._step_count,
                 max_steps=self.max_turns,
                 reward_on_success=self.reward_on_success,
                 step_penalty=self.step_penalty,
+                subgoal_potential_delta=0.0,
             )
 
             # Invalid action - provide feedback
@@ -308,6 +333,11 @@ class BabyAITextEnv(BaseTextEnv):
                     "truncated": turn_limit_reached,
                     "env_truncated": False,
                     "turn_limit_reached": turn_limit_reached,
+                    "reward_mode": self.reward_mode,
+                    "completed_subgoals": self._completed_subgoals,
+                    "total_subgoals": self._total_subgoals,
+                    "subgoal_potential": self._subgoal_potential,
+                    "subgoal_potential_delta": 0.0,
                 },
             )
 
@@ -318,15 +348,21 @@ class BabyAITextEnv(BaseTextEnv):
         self._done = terminated or truncated or turn_limit_reached
         self._success = terminated and reward > 0
         timed_out = truncated or turn_limit_reached
+        completed_subgoals, total_subgoals, subgoal_potential = self._refresh_subgoal_progress(
+            success_override=self._success
+        )
+        subgoal_potential_delta = subgoal_potential - subgoal_potential_before
 
         # Compute reward
         final_reward = utils.compute_reward(
+            reward_mode=self.reward_mode,
             done=self._done,
             success=self._success,
             step_count=self._step_count,
             max_steps=self.max_turns,
             reward_on_success=self.reward_on_success,
             step_penalty=self.step_penalty,
+            subgoal_potential_delta=subgoal_potential_delta,
         )
 
         action_name = utils.ACTION_NAMES.get(action_idx, "unknown")
@@ -339,6 +375,11 @@ class BabyAITextEnv(BaseTextEnv):
             "truncated": bool(timed_out),
             "env_truncated": bool(truncated),
             "turn_limit_reached": bool(turn_limit_reached),
+            "reward_mode": self.reward_mode,
+            "completed_subgoals": completed_subgoals,
+            "total_subgoals": total_subgoals,
+            "subgoal_potential": subgoal_potential,
+            "subgoal_potential_delta": subgoal_potential_delta,
         }
 
         if self._done and terminated:
@@ -373,6 +414,10 @@ class BabyAITextEnv(BaseTextEnv):
             "success": self._success,
             "mission": self._mission,
             "max_turns": self.max_turns,
+            "reward_mode": self.reward_mode,
+            "completed_subgoals": self._completed_subgoals,
+            "total_subgoals": self._total_subgoals,
+            "subgoal_potential": self._subgoal_potential,
         }
 
     @staticmethod
@@ -384,8 +429,10 @@ class BabyAITextEnv(BaseTextEnv):
         n = len(metrics)
         avg_steps = sum(float(m.get("steps", 0)) for m in metrics) / n
         success_rate = sum(1 for m in metrics if m.get("success", False)) / n
+        avg_subgoal_potential = sum(float(m.get("subgoal_potential", 0.0)) for m in metrics) / n
 
         return {
             "avg_steps": avg_steps,
             "success_rate": success_rate,
+            "avg_subgoal_potential": avg_subgoal_potential,
         }

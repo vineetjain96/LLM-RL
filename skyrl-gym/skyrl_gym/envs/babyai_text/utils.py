@@ -1,7 +1,8 @@
 """Utility functions for BabyAI-Text environment."""
 
 import re
-from typing import Optional, Tuple
+from functools import lru_cache
+from typing import Any, Optional, Tuple
 
 # Mapping from text action names to BabyAI action indices
 # BabyAI Actions: left (0), right (1), forward (2), pickup (3), drop (4), toggle (5), done (6)
@@ -34,6 +35,15 @@ ACTION_NAMES = {
     4: "drop",
     5: "toggle",
     6: "done",
+}
+
+REWARD_MODE_BINARY_OUTCOME = "binary_outcome"
+REWARD_MODE_EFFICIENCY_OUTCOME = "efficiency_outcome"
+REWARD_MODE_SUBGOAL_DELTA = "subgoal_delta"
+SUPPORTED_REWARD_MODES = {
+    REWARD_MODE_BINARY_OUTCOME,
+    REWARD_MODE_EFFICIENCY_OUTCOME,
+    REWARD_MODE_SUBGOAL_DELTA,
 }
 
 
@@ -113,40 +123,171 @@ def format_observation(
     return "\n".join(parts)
 
 
+def validate_reward_mode(reward_mode: str) -> str:
+    """Validate and normalize the configured BabyAI reward mode."""
+    if reward_mode not in SUPPORTED_REWARD_MODES:
+        supported_modes = ", ".join(sorted(SUPPORTED_REWARD_MODES))
+        raise ValueError(f"Unsupported BabyAI reward_mode={reward_mode!r}. Expected one of: {supported_modes}")
+    return reward_mode
+
+
 def compute_reward(
+    reward_mode: str,
     done: bool,
     success: bool,
     step_count: int,
     max_steps: int,
     reward_on_success: float = 1.0,
     step_penalty: float = 0.0,
-    partial_reward: float = 0.0,
+    subgoal_potential_delta: float = 0.0,
 ) -> float:
     """
     Compute the reward for a step in the BabyAI environment.
 
     Args:
+        reward_mode: Reward shaping mode to use.
         done: Whether the episode is done
         success: Whether the mission was completed successfully
         step_count: Current step number
         max_steps: Maximum steps allowed
         reward_on_success: Reward for successful completion
         step_penalty: Penalty per step (to encourage efficiency)
-        partial_reward: Partial reward for progress (not implemented yet)
+        subgoal_potential_delta: Change in subgoal completion potential for
+            the current step. Only used by ``subgoal_delta``.
 
     Returns:
         Reward value
     """
+    reward_mode = validate_reward_mode(reward_mode)
+    reward = 0.0
+
+    if reward_mode == REWARD_MODE_SUBGOAL_DELTA:
+        reward += reward_on_success * subgoal_potential_delta
+    elif success:
+        if reward_mode == REWARD_MODE_BINARY_OUTCOME:
+            reward += reward_on_success
+        else:
+            efficiency_bonus = 1.0 - (step_count / max_steps)
+            reward += reward_on_success * (0.5 + 0.5 * efficiency_bonus)
+
+    if not success and not done:
+        reward -= step_penalty
+
+    return reward
+
+
+@lru_cache(maxsize=1)
+def _load_babyai_verifier_types() -> Optional[tuple[type[Any], type[Any], type[Any], type[Any]]]:
+    """Lazily load BabyAI verifier classes when the optional dependency is available."""
+    try:
+        from minigrid.envs.babyai.core.verifier import ActionInstr, AfterInstr, AndInstr, BeforeInstr
+    except ImportError:
+        return None
+    return ActionInstr, AndInstr, BeforeInstr, AfterInstr
+
+
+def _count_atomic_subgoals(
+    instr: Any,
+    action_instr_cls: type[Any],
+    and_instr_cls: type[Any],
+    before_instr_cls: type[Any],
+    after_instr_cls: type[Any],
+) -> int:
+    if isinstance(instr, action_instr_cls):
+        return 1
+    if isinstance(instr, (and_instr_cls, before_instr_cls, after_instr_cls)):
+        return _count_atomic_subgoals(
+            instr.instr_a,
+            action_instr_cls,
+            and_instr_cls,
+            before_instr_cls,
+            after_instr_cls,
+        ) + _count_atomic_subgoals(
+            instr.instr_b,
+            action_instr_cls,
+            and_instr_cls,
+            before_instr_cls,
+            after_instr_cls,
+        )
+    return 0
+
+
+def _count_completed_atomic_subgoals(
+    instr: Any,
+    action_instr_cls: type[Any],
+    and_instr_cls: type[Any],
+    before_instr_cls: type[Any],
+    after_instr_cls: type[Any],
+    status_hint: Optional[str] = None,
+) -> int:
+    if isinstance(instr, action_instr_cls):
+        return int(status_hint == "success")
+
+    if isinstance(instr, (and_instr_cls, before_instr_cls, after_instr_cls)):
+        if status_hint == "success":
+            return _count_atomic_subgoals(
+                instr,
+                action_instr_cls,
+                and_instr_cls,
+                before_instr_cls,
+                after_instr_cls,
+            )
+
+        return _count_completed_atomic_subgoals(
+            instr.instr_a,
+            action_instr_cls,
+            and_instr_cls,
+            before_instr_cls,
+            after_instr_cls,
+            status_hint=getattr(instr, "a_done", None),
+        ) + _count_completed_atomic_subgoals(
+            instr.instr_b,
+            action_instr_cls,
+            and_instr_cls,
+            before_instr_cls,
+            after_instr_cls,
+            status_hint=getattr(instr, "b_done", None),
+        )
+
+    return 0
+
+
+def get_subgoal_progress(instr: Any, success: bool = False) -> Tuple[int, int, float]:
+    """
+    Estimate BabyAI subgoal progress from the verifier state.
+
+    The verifier tracks partial completion for sequential missions in-memory, so
+    we can translate that state into a potential over atomic action clauses
+    without modifying the underlying MiniGrid package.
+    """
+    verifier_types = _load_babyai_verifier_types()
+    if verifier_types is None or instr is None:
+        return 0, 0, 0.0
+
+    action_instr_cls, and_instr_cls, before_instr_cls, after_instr_cls = verifier_types
+    total_subgoals = _count_atomic_subgoals(
+        instr,
+        action_instr_cls,
+        and_instr_cls,
+        before_instr_cls,
+        after_instr_cls,
+    )
+    if total_subgoals == 0:
+        return 0, 0, 0.0
+
     if success:
-        # Scale reward by efficiency (faster completion = higher reward)
-        efficiency_bonus = 1.0 - (step_count / max_steps)
-        return reward_on_success * (0.5 + 0.5 * efficiency_bonus)
-    elif done:
-        # Episode ended without success
-        return 0.0
+        completed_subgoals = total_subgoals
     else:
-        # Intermediate step penalty (optional)
-        return -step_penalty
+        completed_subgoals = _count_completed_atomic_subgoals(
+            instr,
+            action_instr_cls,
+            and_instr_cls,
+            before_instr_cls,
+            after_instr_cls,
+        )
+
+    potential = completed_subgoals / total_subgoals
+    return completed_subgoals, total_subgoals, potential
 
 
 def get_direction_name(direction: int) -> str:

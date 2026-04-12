@@ -171,6 +171,43 @@ python examples/train/babyai_text/babyai_text_dataset.py \
   --max_turns 32
 ```
 
+## Eval suites
+
+The BabyAI dataset generator can now build a validation *suite* instead of a single held-out split. The suite is still saved as `validation.parquet`, but each eval condition gets its own `data_source`, so training logs and dumped eval files stay separated by condition automatically.
+
+This is the lowest-friction path because the trainer does not need any custom wiring:
+
+- `data.val_data` still points to `validation.parquet`
+- eval metrics are grouped by `data_source`
+- eval-only runs against a saved checkpoint use the exact same suite file
+
+The `scripts/cc/run_babyai_actor_critic_sync.sh` launcher enables this by default with two independent curves:
+
+- `EVAL_SUITE_PARAM_1=room_size`
+- `EVAL_SUITE_VALUES_1=8,10,12,14`
+- `EVAL_SUITE_PARAM_2=num_dists`
+- `EVAL_SUITE_VALUES_2=4,8,12,16`
+- `EVAL_SUITE_INCLUDE_JOINT=false`
+- `EVAL_SUITE_EXAMPLES_PER_CONDITION=64`
+
+That produces:
+
+- the same-task anchor
+- a room-size-only curve
+- a distractor-only curve
+
+For `GoToLocal` with base kwargs `room_size=8` and `num_dists=8`, that defaults to a 7-condition training-time probe:
+
+- `(8, 8)`
+- `(10, 8)`, `(12, 8)`, `(14, 8)`
+- `(8, 4)`, `(8, 12)`, `(8, 16)`
+
+If you do want the full cross-product as a heavier checkpoint eval, set `EVAL_SUITE_INCLUDE_JOINT=true`.
+
+The implementation is generic over env kwargs, so for other BabyAI tasks you usually only need to change the param names and values. If a task does not support `num_dists`, leave `EVAL_SUITE_PARAM_2` empty or disable the suite with `ENABLE_EVAL_SUITE=false`.
+
+Each generated suite also writes `validation_manifest.json` so you can see exactly which conditions were included.
+
 ## Recommended starting recipes
 
 ### Easy sync baseline
